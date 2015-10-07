@@ -93,6 +93,24 @@ void Mesh::EmptyExtra()
 /*----------------------------------------------------------------*/
 
 
+// extract array of vertices incident to each vertex
+void Mesh::ListIncidenteVertices()
+{
+	vertexVertices.Empty();
+	vertexVertices.Resize(vertices.GetSize());
+	FOREACH(i, faces) {
+		const Face& face = faces[i];
+		for (int v=0; v<3; ++v) {
+			VertexIdxArr& verts(vertexVertices[face[v]]);
+			for (int i=1; i<3; ++i) {
+				const VIndex idxVert(face[(v+i)%3]);
+				if (verts.Find(idxVert) == VertexIdxArr::NO_INDEX)
+					verts.Insert(idxVert);
+			}
+		}
+	}
+}
+
 // extract array of triangles incident to each vertex
 void Mesh::ListIncidenteFaces()
 {
@@ -146,24 +164,19 @@ void Mesh::ComputeNormalFaces()
 {
 	faceNormals.Resize(faces.GetSize());
 	#ifndef _USE_CUDA
-	FOREACH(idxFace, faces) {
-		const Face& face = faces[idxFace];
-		const Vertex& v0 = vertices[face[0]];
-		const Vertex& v1 = vertices[face[1]];
-		const Vertex& v2 = vertices[face[2]];
-		Normal& normal = faceNormals[idxFace];
-		normal = normalized((v1-v0).cross(v2-v0));
-	}
+	FOREACH(idxFace, faces)
+		faceNormals[idxFace] = normalized(FaceNormal(faces[idxFace]));
 	#else
-	checkCudaErrors(kernelComputeFaceNormal((int)faces.GetSize(),
+	reportCudaError(kernelComputeFaceNormal((int)faces.GetSize(),
 		vertices,
 		faces,
 		CUDA::KernelRT::OutputParam(faceNormals.GetDataSize()),
 		faces.GetSize()
 	));
-	checkCudaErrors(kernelComputeFaceNormal.GetResult(0,
+	reportCudaError(kernelComputeFaceNormal.GetResult(0,
 		faceNormals
 	));
+	kernelComputeFaceNormal.Reset();
 	#endif
 }
 
@@ -285,6 +298,18 @@ void Mesh::GetAdjVertices(VIndex v, VertexIdxArr& indices) const
 			if (vAdj != v && setIndices.insert(vAdj).second)
 				indices.Insert(vAdj);
 		}
+	}
+}
+
+void Mesh::GetAdjVertexFaces(VIndex idxVCenter, VIndex idxVAdj, FaceIdxArr& indices) const
+{
+	ASSERT(vertexFaces.GetSize() == vertices.GetSize());
+	const FaceIdxArr& idxFaces = vertexFaces[idxVCenter];
+	FOREACHPTR(pIdxFace, idxFaces) {
+		const Face& face = faces[*pIdxFace];
+		ASSERT(FindVertex(face, idxVCenter) != NO_ID);
+		if (FindVertex(face, idxVAdj) != NO_ID)
+			indices.Insert(*pIdxFace);
 	}
 }
 /*----------------------------------------------------------------*/
@@ -613,8 +638,8 @@ struct VertexInfo {
 			return (filterVerts->find(boost::source(e,*graph)) == filterVerts->cend() &&
 					filterVerts->find(boost::target(e,*graph)) == filterVerts->cend());
 		}
-		const VertexSet* filterVerts;
 		const Graph* graph;
+		const VertexSet* filterVerts;
 	};
 
 	VertexMap index2idx; // useful/valid only during graph creation
@@ -904,7 +929,7 @@ public:
 
 // decimate, clean and smooth mesh
 // fDecimate factor is in range (0..1], if 1 no decimation takes place
-void Mesh::Clean(float fDecimate, float fSpurious, bool bRemoveSpikes, unsigned nCloseHoles, unsigned nSmooth)
+void Mesh::Clean(float fDecimate, float fSpurious, bool bRemoveSpikes, unsigned nCloseHoles, unsigned nSmooth, bool bLastClean)
 {
 	TD_TIMER_STARTD();
 	// create VCG mesh
@@ -931,11 +956,11 @@ void Mesh::Clean(float fDecimate, float fSpurious, bool bRemoveSpikes, unsigned 
 		FOREACHPTR(pFace, faces) {
 			const Face& f(*pFace);
 			ASSERT((*fi).VN() == 3);
-			ASSERT(f[0]>=0 && f[0]<(uint32_t)mesh.vn);
+			ASSERT(f[0]<(uint32_t)mesh.vn);
 			(*fi).V(0) = indices[f[0]];
-			ASSERT(f[1]>=0 && f[1]<(uint32_t)mesh.vn);
+			ASSERT(f[1]<(uint32_t)mesh.vn);
 			(*fi).V(1) = indices[f[1]];
-			ASSERT(f[2]>=0 && f[2]<(uint32_t)mesh.vn);
+			ASSERT(f[2]<(uint32_t)mesh.vn);
 			(*fi).V(2) = indices[f[2]];
 			++fi;
 		}
@@ -992,20 +1017,29 @@ void Mesh::Clean(float fDecimate, float fSpurious, bool bRemoveSpikes, unsigned 
 		DEBUG_ULTIMATE("Removed %d non-manifold faces", nNonManifoldFaces);
 		const int nDegenerateVertices = vcg::tri::Clean<CLEAN::Mesh>::RemoveDegenerateVertex(mesh);
 		DEBUG_ULTIMATE("Removed %d degenerate vertices", nDegenerateVertices);
-		#if 0
+		const int nUnreferencedVertices = vcg::tri::Clean<CLEAN::Mesh>::RemoveUnreferencedVertex(mesh);
+		DEBUG_ULTIMATE("Removed %d unreferenced vertices", nUnreferencedVertices);
+		#if 1
 		const int nDuplicateVertices = vcg::tri::Clean<CLEAN::Mesh>::RemoveDuplicateVertex(mesh);
 		DEBUG_ULTIMATE("Removed %d duplicate vertices", nDuplicateVertices);
 		#endif
-		const int nUnreferencedVertices = vcg::tri::Clean<CLEAN::Mesh>::RemoveUnreferencedVertex(mesh);
-		DEBUG_ULTIMATE("Removed %d unreferenced vertices", nUnreferencedVertices);
-		#if 0 // not working
-		const int nSplitNonManifoldVertices = vcg::tri::Clean<CLEAN::Mesh>::SplitNonManifoldVertex(mesh, 0);
-		DEBUG_ULTIMATE("Split %d non-manifold vertices", nSplitNonManifoldVertices);
-		#endif
+		#if 1
+		vcg::tri::Allocator<CLEAN::Mesh>::CompactFaceVector(mesh);
+		vcg::tri::Allocator<CLEAN::Mesh>::CompactVertexVector(mesh);
+		for (int i=0; i<10; ++i) {
+			vcg::tri::UpdateTopology<CLEAN::Mesh>::FaceFace(mesh);
+			vcg::tri::UpdateTopology<CLEAN::Mesh>::VertexFace(mesh);
+			const int nSplitNonManifoldVertices = vcg::tri::Clean<CLEAN::Mesh>::SplitNonManifoldVertex(mesh, 0.1f);
+			DEBUG_ULTIMATE("Split %d non-manifold vertices", nSplitNonManifoldVertices);
+			if (nSplitNonManifoldVertices == 0)
+				break;
+		}
+		#else
 		const int nNonManifoldVertices = vcg::tri::Clean<CLEAN::Mesh>::RemoveNonManifoldVertex(mesh);
 		DEBUG_ULTIMATE("Removed %d non-manifold vertices", nNonManifoldVertices);
 		vcg::tri::Allocator<CLEAN::Mesh>::CompactFaceVector(mesh);
 		vcg::tri::Allocator<CLEAN::Mesh>::CompactVertexVector(mesh);
+		#endif
 		vcg::tri::UpdateTopology<CLEAN::Mesh>::AllocateEdge(mesh);
 	}
 
@@ -1021,7 +1055,7 @@ void Mesh::Clean(float fDecimate, float fSpurious, bool bRemoveSpikes, unsigned 
 		const auto ret(ComputeX84Threshold<float,float>(edgeLens.Begin(), edgeLens.GetSize(), 3.f*fSpurious));
 		const float thLongEdge(ret.first+ret.second);
 		#else
-		const float thLongEdge(edgeLens.GetNth(edgeLens.GetSize()*9/10)*fSpurious);
+		const float thLongEdge(edgeLens.GetNth(edgeLens.GetSize()*95/100)*fSpurious);
 		#endif
 		// remove faces with too long edges
 		const size_t numLongFaces(vcg::tri::UpdateSelection<CLEAN::Mesh>::FaceOutOfRangeEdge(mesh, 0, thLongEdge));
@@ -1031,7 +1065,7 @@ void Mesh::Clean(float fDecimate, float fSpurious, bool bRemoveSpikes, unsigned 
 		DEBUG_ULTIMATE("Removed %d faces with edges longer than %f", numLongFaces, thLongEdge);
 		// remove isolated components
 		vcg::tri::UpdateTopology<CLEAN::Mesh>::FaceFace(mesh);
-		const std::pair<int, int> delInfo(vcg::tri::Clean<CLEAN::Mesh>::RemoveSmallConnectedComponentsDiameter(mesh, thLongEdge*1.5f));
+		const std::pair<int, int> delInfo(vcg::tri::Clean<CLEAN::Mesh>::RemoveSmallConnectedComponentsDiameter(mesh, thLongEdge));
 		DEBUG_ULTIMATE("Removed %d connected components out of %d", delInfo.second, delInfo.first);
 	}
 
@@ -1081,6 +1115,8 @@ void Mesh::Clean(float fDecimate, float fSpurious, bool bRemoveSpikes, unsigned 
 	if (nCloseHoles > 0) {
 		if (fSpurious <= 0 && !bRemoveSpikes)
 			vcg::tri::UpdateTopology<CLEAN::Mesh>::FaceFace(mesh);
+		vcg::tri::UpdateNormal<CLEAN::Mesh>::PerFaceNormalized(mesh);
+		vcg::tri::UpdateNormal<CLEAN::Mesh>::PerVertexAngleWeighted(mesh);
 		ASSERT(vcg::tri::Clean<CLEAN::Mesh>::CountNonManifoldEdgeFF(mesh) == 0);
 		const int OriginalSize(mesh.fn);
 		#if 1
@@ -1107,15 +1143,19 @@ void Mesh::Clean(float fDecimate, float fSpurious, bool bRemoveSpikes, unsigned 
 	}
 
 	// clean mesh
-	if (fSpurious > 0 || bRemoveSpikes || nCloseHoles > 0 || nSmooth > 0) {
+	if (bLastClean && (fSpurious > 0 || bRemoveSpikes || nCloseHoles > 0 || nSmooth > 0)) {
 		const int nNonManifoldFaces = vcg::tri::Clean<CLEAN::Mesh>::RemoveNonManifoldFace(mesh);
 		DEBUG_ULTIMATE("Removed %d non-manifold faces", nNonManifoldFaces);
 		#if 0 // not working
-		const int nSplitNonManifoldVertices = vcg::tri::Clean<CLEAN::Mesh>::SplitNonManifoldVertex(mesh, 0);
+		vcg::tri::Allocator<CLEAN::Mesh>::CompactEveryVector(mesh);
+		vcg::tri::UpdateTopology<CLEAN::Mesh>::FaceFace(mesh);
+		vcg::tri::UpdateTopology<CLEAN::Mesh>::VertexFace(mesh);
+		const int nSplitNonManifoldVertices = vcg::tri::Clean<CLEAN::Mesh>::SplitNonManifoldVertex(mesh, 0.1f);
 		DEBUG_ULTIMATE("Split %d non-manifold vertices", nSplitNonManifoldVertices);
-		#endif
+		#else
 		const int nNonManifoldVertices = vcg::tri::Clean<CLEAN::Mesh>::RemoveNonManifoldVertex(mesh);
 		DEBUG_ULTIMATE("Removed %d non-manifold vertices", nNonManifoldVertices);
+		#endif
 	}
 
 	// import VCG mesh
@@ -1209,7 +1249,7 @@ bool Mesh::Load(const String& fileName)
 		DEBUG_EXTRA("error: invalid PLY file");
 		return false;
 	}
-	for (int i = 0; i < ply.elems.size(); i++) {
+	for (int i = 0; i < (int)ply.elems.size(); ++i) {
 		int elem_count;
 		LPCSTR elem_name = ply.setup_element_read(i, &elem_count);
 		if (PLY::equal_strings(BasicPLY::elem_names[0], elem_name)) {
@@ -1226,11 +1266,11 @@ bool Mesh::Load(const String& fileName)
 
 	// read PLY body
 	BasicPLY::Face face;
-	for (int i = 0; i < ply.elems.size(); i++) {
+	for (int i = 0; i < (int)ply.elems.size(); i++) {
 		int elem_count;
 		LPCSTR elem_name = ply.setup_element_read(i, &elem_count);
 		if (PLY::equal_strings(BasicPLY::elem_names[0], elem_name)) {
-			ASSERT(vertices.GetSize() == elem_count);
+			ASSERT(vertices.GetSize() == (VIndex)elem_count);
 			ply.setup_property(BasicPLY::vert_props[0]);
 			ply.setup_property(BasicPLY::vert_props[1]);
 			ply.setup_property(BasicPLY::vert_props[2]);
@@ -1238,7 +1278,7 @@ bool Mesh::Load(const String& fileName)
 				ply.get_element(pVert);
 		} else
 		if (PLY::equal_strings(BasicPLY::elem_names[1], elem_name)) {
-			ASSERT(faces.GetSize() == elem_count);
+			ASSERT(faces.GetSize() == (FIndex)elem_count);
 			ply.setup_property(BasicPLY::face_props[0]);
 			FOREACHPTR(pFace, faces) {
 				ply.get_element(&face);
@@ -1384,6 +1424,8 @@ bool Mesh::Save(const VertexArr& vertices, const String& fileName, bool bBinary)
 #include <CGAL/Triangulation_face_base_with_info_2.h>
 #include <CGAL/Triangulation_vertex_base_with_info_2.h>
 
+#include <CGAL/Inverse_index.h>
+
 #define CURVATURE_TH 0 // 0.1
 #define ROBUST_NORMALS 0 // 4
 #define ENSURE_MIN_AREA 0 // 2
@@ -1396,6 +1438,21 @@ typedef Kernel::Point_3                                Point;
 typedef Kernel::Vector_3                               Vector;
 typedef Kernel::Triangle_3                             Triangle;
 typedef Kernel::Plane_3	                               Plane;
+
+inline double v_norm(const Vector& A) {
+	return SQRT(A*A); // operator * is overloaded as dot product
+}
+inline Vector v_normalized(const Vector& A) {
+	const double nrmSq(A*A);
+	return (nrmSq==0 ? A : A / SQRT(nrmSq));
+}
+inline double v_angle(const Vector& A, const Vector& B) {
+	return acos(MAXF(-1.0, MINF(1.0, v_normalized(A)*v_normalized(B))));
+}
+inline double p_angle(const Point& A, const Point& B, const Point& C) {
+	return v_angle(A-B, C-B);
+}
+#define edge_size(h) v_norm((h)->vertex()->point() - (h)->next()->next()->vertex()->point())
 
 template <class Refs, class T, class P, class Normal>
 class MeshVertex : public CGAL::HalfedgeDS_vertex_base<Refs, T, P>
@@ -1586,21 +1643,6 @@ typedef Polyhedron::Halfedge_const_iterator            Halfedge_const_iterator;
 typedef Polyhedron::Halfedge_around_facet_circulator   HF_circulator;
 typedef Polyhedron::Halfedge_around_vertex_circulator  HV_circulator;
 
-inline double v_norm(const Vector& A) {
-	return SQRT(A*A); // operator * is overloaded as dot product
-}
-inline Vector v_normalized(const Vector& A) {
-	const double nrmSq(A*A);
-	return (nrmSq==0 ? A : A / SQRT(nrmSq));
-}
-inline double v_angle(const Vector& A, const Vector& B) {
-	return acos(MAXF(-1.0, MINF(1.0, v_normalized(A)*v_normalized(B))));
-}
-inline double p_angle(const Point& A, const Point& B, const Point& C) {
-	return v_angle(A-B, C-B);
-}
-#define edge_size(h) v_norm((h)->vertex()->point() - (h)->next()->next()->vertex()->point())
-
 struct Stats {
 	double min, avg, stdDev, max;
 };
@@ -1669,17 +1711,20 @@ inline bool CanCollapseCenterVertex(Vertex::Vertex_handle v) {
 #define REPLACE_POINT(V,P1,P2,PMIDDLE) (((V==P1)||(V==P2)) ? (PMIDDLE) : (V))
 static bool CanCollapseEdge(Vertex::Halfedge_handle v0v1)
 {
+	if (v0v1->is_border_edge())
+		return false;
 	Vertex::Halfedge_handle v1v0 = v0v1->opposite();
+	if (v0v1->next()->opposite()->facet() == v1v0->prev()->opposite()->facet())
+		return false;
 	Vertex::Vertex_handle v0 = v0v1->vertex();
+	if (v0->isBorder())
+		return false;
 	Vertex::Vertex_handle v1 = v1v0->vertex();
+	if (v1->isBorder())
+		return false;
 
-	if (v0v1->is_border_edge()) return false;
-	if (v0->isBorder() || v1->isBorder()) return false;
-	Vertex::Vertex_handle vl, vr, vTmp;
+	Vertex::Vertex_handle vl, vr;
 	Vertex::Halfedge_handle h1, h2;
-
-	if (v0v1->next()->opposite()->facet() == v1v0->prev()->opposite()->facet()) return false;
-
 	if (!v0v1->is_border()) {
 		vl = v0v1->next()->vertex();
 		h1 = v0v1->next();
@@ -1687,7 +1732,6 @@ static bool CanCollapseEdge(Vertex::Halfedge_handle v0v1)
 		if (h1->is_border() || h2->is_border())
 			return false;
 	}
-
 	if (!v1v0->is_border()) {
 		vr = v1v0->next()->vertex();
 		h1 = v1v0->next();
@@ -1696,7 +1740,8 @@ static bool CanCollapseEdge(Vertex::Halfedge_handle v0v1)
 			return false;
 	}
 	// if vl and vr are equal or both invalid -> fail
-	if (vl == vr) return false;
+	if (vl == vr)
+		return false;
 
 	HV_circulator c, d;
 
@@ -1711,7 +1756,7 @@ static bool CanCollapseEdge(Vertex::Halfedge_handle v0v1)
 
 	c = v0->vertex_begin(); d = c;
 	CGAL_For_all(c, d) {
-		vTmp =c->opposite()->vertex();
+		Vertex::Vertex_handle vTmp =c->opposite()->vertex();
 		if (vTmp->flags.isSet(Vertex::FLG_EULER) && (vTmp!=vl) && (vTmp!=vr))
 			return false;
 	}
@@ -1885,10 +1930,8 @@ static int ImproveVertexValence(Polyhedron& p, int valence_mode=2)
 	switch (valence_mode) {
 	case 1: {
 		//erase all the center triangles!
-		for (Vertex_iterator vi=p.vertices_begin(); vi!=p.vertices_end(); ) {
+		for (Vertex_iterator vi=p.vertices_begin(); vi!=p.vertices_end(); ++vi) {
 			Vertex::Vertex_handle old_vi = vi;
-			vi++;
-			size_t degree = old_vi->vertex_degree();
 			if (CanCollapseCenterVertex(old_vi))
 				p.erase_center_vertex(old_vi->halfedge());
 		}
@@ -1914,12 +1957,12 @@ static int ImproveVertexValence(Polyhedron& p, int valence_mode=2)
 					current_edge_stats = (float)edge_size(c);
 				}
 				d = c;
-				bool collapsed(false);
+				//bool collapsed(false);
 				CGAL_For_all(c, d) {
 					if (CanCollapseEdge(c->opposite())) {
 						//if ((c->opposite()->vertex()==vi) && (vi!=p.vertices_end())) vi++;
 						CollapseEdge(p, c->opposite());
-						collapsed = true;
+						//collapsed = true;
 						total_no_ops++;
 						break;
 					}
@@ -1934,17 +1977,14 @@ static int ImproveVertexValence(Polyhedron& p, int valence_mode=2)
 		do {
 			iters++;
 			no_ops = 0;
-			for (Edge_iterator ei=p.edges_begin(); ei!=p.edges_end(); ) {
-				if (ei->is_border_edge()) {
-					ei++;
+			for (Edge_iterator ei=p.edges_begin(); ei!=p.edges_end(); ++ei) {
+				if (ei->is_border_edge())
 					continue;
-				}
 				int d1_1 = (int)ei->vertex()->vertex_degree();
 				int d1_2 = (int)ei->opposite()->vertex()->vertex_degree();
 				int d2_1 = (int)ei->next()->vertex()->vertex_degree();
 				int d2_2 = (int)ei->opposite()->next()->vertex()->vertex_degree();
 				Vertex::Halfedge_handle h = ei;
-				ei++;
 				if (((d1_1+d1_2) - (d2_1+d2_2) > 2) && CanFlipEdge(h)) {
 					FlipEdge(p, h);
 					no_ops++;
@@ -1960,11 +2000,9 @@ static int ImproveVertexValence(Polyhedron& p, int valence_mode=2)
 		do {
 			iters++;
 			no_ops = 0;
-			for (Edge_iterator ei=p.edges_begin(); ei!=p.edges_end(); ) {
-				if (ei->is_border_edge()) {
-					ei++;
+			for (Edge_iterator ei=p.edges_begin(); ei!=p.edges_end(); ++ei) {
+				if (ei->is_border_edge())
 					continue;
-				}
 				Point p1=ei->vertex()->point();
 				Point p2=ei->next()->vertex()->point();
 				Point p3=ei->prev()->vertex()->point();
@@ -1974,7 +2012,6 @@ static int ImproveVertexValence(Polyhedron& p, int valence_mode=2)
 				float cost2((float)MINF(MINF(MINF(MINF(MINF(p_angle(p1, p2, p4), p_angle(p1, p4, p2)), p_angle(p3, p4, p2)), p_angle(p4, p2, p3)), p_angle(p4, p1, p2)), p_angle(p4, p3, p2)));
 
 				Vertex::Halfedge_handle h = ei;
-				ei++;
 				if ((cost2 > cost1) && CanFlipEdge(h)) {
 					FlipEdge(p, h);
 					no_ops++;
@@ -2176,7 +2213,7 @@ inline Vector ComputeVectorComponent(Vector n, Vector v, int mode)
 		return v - across_normal;
 }
 
-static void Smooth(Polyhedron& p, double delta, int mode=0, bool only_visible=false)
+static void Smooth(Polyhedron& p, double delta, int mode=0)
 {
 	// 0 - both components;
 	// 1 - tangetial;
@@ -2222,7 +2259,7 @@ static void Smooth(Polyhedron& p, double delta, int mode=0, bool only_visible=fa
 //         10 - fixDegeneracy=Yes smoothing=No;
 // - max_iter (default=30) - maximum number of iterations to be performed; since there is no guarantee that one operations (such as a collapse, for example)
 //   will not in turn generate new degeneracies, operations are being performed on the mesh in an iterative fashion. 
-static void EnsureEdgeSize(Polyhedron& p, double epsilonMin, double epsilonMax, double collapseRatio, double degenerate_angle_deg, int mode, int max_iters)
+static void EnsureEdgeSize(Polyhedron& p, double epsilonMin, double epsilonMax, double collapseRatio, double degenerate_angle_deg, int mode, int max_iters, int comp_size_threshold)
 {
 	if (mode>0)
 		FixDegeneracy(p, collapseRatio, degenerate_angle_deg);
@@ -2308,7 +2345,8 @@ static void EnsureEdgeSize(Polyhedron& p, double epsilonMin, double epsilonMax, 
 			Smooth(p, 0.1, 1);
 	}
 
-	RemoveConnectedComponents(p, 100, (float)edge.min*2);
+	if (comp_size_threshold > 0)
+		RemoveConnectedComponents(p, comp_size_threshold, (float)edge.min*2);
 
 	#if TD_VERBOSE != TD_VERBOSE_OFF
 	if (VERBOSITY_LEVEL > 2) {
@@ -2504,25 +2542,29 @@ public:
 			B.add_vertex(Point(v.x, v.y, v.z));
 		}
 		// add the facets
+		#if TD_VERBOSE != TD_VERBOSE_OFF
+		String msgFaces;
+		#endif
 		FOREACH(i, faces) {
 			const Mesh::Face& f = faces[i];
 			if (!B.test_facet(f.ptr(), f.ptr()+3)) {
-				if (!bProblems) {
-					std::cout << "WARNING: following facet(s) violate the manifold constraint (will be ignored):";
-					bProblems=true;
-				}
-				std::cout << " " << i;
-				std::cout.flush();
+				bProblems = true;
+				#if TD_VERBOSE != TD_VERBOSE_OFF
+				if (VERBOSITY_LEVEL > 1)
+					msgFaces += String::FormatString(" %u", i);
+				#endif
 				continue;
 			}
 			B.add_facet(f.ptr(), f.ptr()+3);
 		}
+		#if TD_VERBOSE != TD_VERBOSE_OFF
 		if (bProblems)
-			std::cout << std::endl;
-		//if (B.check_unconnected_vertices()) {
-		//	std::cout << "WARNING: unconnected vertices exists. They will be removed" << std::endl;
-		//	B.remove_unconnected_vertices();
-		//}
+			DEBUG_EXTRA("warning: ignoring the following facet(s) violating the manifold constraint:%s", msgFaces.c_str());
+		#endif
+		if (B.check_unconnected_vertices()) {
+			DEBUG_EXTRA("warning: remove unconnected vertices");
+			B.remove_unconnected_vertices();
+		}
 		B.end_surface();
 	}
 };
@@ -2530,8 +2572,6 @@ typedef TMeshBuilder<Polyhedron::HalfedgeDS, Kernel> MeshBuilder;
 static bool ImportMesh(Polyhedron& p, const Mesh::VertexArr& vertices, const Mesh::FaceArr& faces) {
 	MeshBuilder builder(vertices, faces);
 	p.delegate(builder);
-	if (builder.bProblems)
-		return false;
 	UpdateMeshData(p);
 	DEBUG_ULTIMATE("Mesh imported: %u vertices, %u facets (%u border edges)", p.size_of_vertices(), p.size_of_facets(), p.size_of_border_edges());
 	return true;
@@ -2547,22 +2587,29 @@ static bool ExportMesh(const Polyhedron& p, Mesh::VertexArr& vertices, Mesh::Fac
 	vertices.Resize((Mesh::VIndex)p.size_of_vertices());
 	for (Polyhedron::Vertex_const_iterator it=p.vertices_begin(), ite=p.vertices_end(); it!=ite; ++it) {
 		Mesh::Vertex& v = vertices[nCount++];
-		v.x = (float)it->point().x();
-		v.y = (float)it->point().y();
-		v.z = (float)it->point().z();
+		v.x = (float)CGAL::to_double(it->point().x());
+		v.y = (float)CGAL::to_double(it->point().y());
+		v.z = (float)CGAL::to_double(it->point().z());
 	}
 	// extract the faces
 	nCount = 0;
 	faces.Resize((Mesh::FIndex)p.size_of_facets());
+	CGAL::Inverse_index<Polyhedron::Vertex_const_iterator> index(p.vertices_begin(), p.vertices_end());
 	for (Polyhedron::Face_const_iterator it=p.facets_begin(), ite=p.facets_end(); it!=ite; ++it) {
 		ASSERT(it->is_triangle());
-		Polyhedron::Halfedge_around_facet_const_circulator j = it->facet_begin();
-		ASSERT(CGAL::circulator_size(j) == 3);
+		Polyhedron::Halfedge_around_facet_const_circulator hc = it->facet_begin();
+		ASSERT(CGAL::circulator_size(hc) == 3);
 		Mesh::Face& facet = faces[nCount++];
+		#if 0
+		Polyhedron::Halfedge_around_facet_const_circulator hc_end = hc;
 		unsigned i(0);
 		do {
-			facet[i++] = (Mesh::FIndex)std::distance(p.vertices_begin(), j->vertex());
-		} while (++j != it->facet_begin());
+			facet[i++] = (Mesh::FIndex)index[Polyhedron::Vertex_const_iterator(hc->vertex())];
+		} while (++hc != hc_end);
+		#else
+		for (int i=0; i<3; ++i, ++hc)
+			facet[i] = (Mesh::FIndex)index[Polyhedron::Vertex_const_iterator(hc->vertex())];
+		#endif
 	}
 	DEBUG_ULTIMATE("Mesh exported: %u vertices, %u facets (%u border edges)", p.size_of_vertices(), p.size_of_facets(), p.size_of_border_edges());
 	return true;
@@ -2574,11 +2621,608 @@ void Mesh::EnsureEdgeSize(float epsilonMin, float epsilonMax, float collapseRati
 	CLN::Polyhedron p;
 	CLN::ImportMesh(p, vertices, faces);
 	Release();
-	CLN::EnsureEdgeSize(p, epsilonMin, epsilonMax, collapseRatio, degenerate_angle_deg, mode, max_iters);
+	CLN::EnsureEdgeSize(p, epsilonMin, epsilonMax, collapseRatio, degenerate_angle_deg, mode, max_iters, 0);
 	CLN::ExportMesh(p, vertices, faces);
 }
 /*----------------------------------------------------------------*/
 
+// subdivide mesh faces if its projection area
+// is bigger than the given number of pixels
+void Mesh::Subdivide(const AreaArr& maxAreas, uint32_t maxArea)
+{
+	ASSERT(vertexFaces.GetSize() == vertices.GetSize());
+
+	// each face that needs to split, remember for each edge the new vertex index
+	// (each new vertex index corresponds to the edge opposed to the existing vertex index)
+	struct SplitFace {
+		VIndex idxVert[3];
+		bool bSplit;
+		enum {NO_VERT = (VIndex)-1};
+		inline SplitFace() : bSplit(false) { memset(idxVert, 0xFF, sizeof(VIndex)*3); }
+		static VIndex FindSharedEdge(const Face& f, const Face& a) {
+			for (int i=0; i<2; ++i) {
+				const VIndex v(f[i]);
+				if (v != a[0] && v != a[1] && v != a[2])
+					return i;
+			}
+			ASSERT(f[2] != a[0] && f[2] != a[1] && f[2] != a[2]);
+			return 2;
+		}
+	};
+	typedef std::unordered_map<FIndex,SplitFace> FacetSplitMap;
+
+	// used to find adjacent face
+	typedef Mesh::FacetCountMap FacetCountMap;
+
+	// for each image, compute the projection area of visible faces
+	FacetSplitMap mapSplits; mapSplits.reserve(faces.GetSize());
+	FacetCountMap mapFaces; mapFaces.reserve(12*3);
+	vertices.Reserve(vertices.GetSize()*2);
+	faces.Reserve(faces.GetSize()*3);
+	FOREACH(f, maxAreas) {
+		const AreaArr::Type area(maxAreas[f]);
+		if (area <= maxArea)
+			continue;
+		// split face in four triangles
+		// by adding a new vertex at the middle of each edge
+		faces.ReserveExtra(4);
+		Face& newface = faces.AddEmpty(); // defined by the three new vertices
+		const Face& face = faces[(FIndex)f];
+		SplitFace& split = mapSplits[(FIndex)f];
+		for (int i=0; i<3; ++i) {
+			// if the current edge was already split, used the existing vertex
+			if (split.idxVert[i] != SplitFace::NO_VERT) {
+				newface[i] = split.idxVert[i];
+				continue;
+			}
+			// create a new vertex at the middle of the current edge
+			// (current edge is the opposite edge to the current vertex index)
+			split.idxVert[i] = newface[i] = vertices.GetSize();
+			vertices.AddConstruct((vertices[face[(i+1)%3]]+vertices[face[(i+2)%3]])*0.5f);
+		}
+		// create the last three faces, defined by one old and two new vertices
+		for (int i=0; i<3; ++i) {
+			Face& nf = faces.AddEmpty();
+			nf[0] = face[i];
+			nf[1] = newface[(i+2)%3];
+			nf[2] = newface[(i+1)%3];
+		}
+		split.bSplit = true;
+		// find all three adjacent faces and inform them of the split
+		ASSERT(mapFaces.empty());
+		for (int i=0; i<3; ++i) {
+			const Mesh::FaceIdxArr& vf = vertexFaces[face[i]];
+			FOREACHPTR(pFace, vf)
+				++mapFaces[*pFace].count;
+		}
+		for (const auto& fc: mapFaces) {
+			ASSERT(fc.second.count <= 2 || (fc.second.count == 3 && fc.first == f));
+			if (fc.second.count != 2)
+				continue;
+			if (fc.first < f && maxAreas[fc.first] > maxArea) {
+				// already fully split, nothing to do
+				ASSERT(mapSplits[fc.first].idxVert[SplitFace::FindSharedEdge(faces[fc.first], face)] == newface[SplitFace::FindSharedEdge(face, faces[fc.first])]);
+				continue;
+			}
+			const VIndex idxVertex(newface[SplitFace::FindSharedEdge(face, faces[fc.first])]);
+			VIndex& idxSplit = mapSplits[fc.first].idxVert[SplitFace::FindSharedEdge(faces[fc.first], face)];
+			ASSERT(idxSplit == SplitFace::NO_VERT || idxSplit == idxVertex);
+			idxSplit = idxVertex;
+		}
+		mapFaces.clear();
+	}
+
+	// add all faces partially split
+	int indices[3];
+	for (const auto& s: mapSplits) {
+		const SplitFace& split = s.second;
+		if (split.bSplit)
+			continue;
+		int count(0);
+		for (int i=0; i<3; ++i) {
+			if (split.idxVert[i] != SplitFace::NO_VERT)
+				indices[count++] = i;
+		}
+		ASSERT(count > 0);
+		faces.ReserveExtra(4);
+		const Face& face = faces[s.first];
+		switch (count) {
+		case 1: {
+			// one edge is split; create two triangles
+			const int i(indices[0]);
+			Face& nf0 = faces.AddEmpty();
+			nf0[0] = split.idxVert[i];
+			nf0[1] = face[(i+2)%3];
+			nf0[2] = face[i];
+			Face& nf1 = faces.AddEmpty();
+			nf1[0] = split.idxVert[i];
+			nf1[1] = face[i];
+			nf1[2] = face[(i+1)%3];
+			break; }
+		case 2: {
+			// two edges are split; create three triangles
+			const int i0(indices[0]);
+			const int i1(indices[1]);
+			Face& nf0 = faces.AddEmpty();
+			Face& nf1 = faces.AddEmpty();
+			Face& nf2 = faces.AddEmpty();
+			if (i0==0) {
+				if (i1==1) {
+					nf0[0] = split.idxVert[1];
+					nf0[1] = split.idxVert[0];
+					nf0[2] = face[2];
+					nf1[0] = face[0];
+					nf1[1] = face[1];
+					nf1[2] = split.idxVert[0];
+					nf2[0] = face[0];
+					nf2[1] = split.idxVert[0];
+					nf2[2] = split.idxVert[1];
+				} else {
+					nf0[0] = split.idxVert[2];
+					nf0[1] = face[1];
+					nf0[2] = split.idxVert[0];
+					nf1[0] = face[0];
+					nf1[1] = split.idxVert[2];
+					nf1[2] = face[2];
+					nf2[0] = split.idxVert[2];
+					nf2[1] = split.idxVert[0];
+					nf2[2] = face[2];
+				}
+			} else {
+				ASSERT(i0==1 && i1==2);
+				nf0[0] = face[0];
+				nf0[1] = split.idxVert[2];
+				nf0[2] = split.idxVert[1];
+				nf1[0] = split.idxVert[1];
+				nf1[1] = face[1];
+				nf1[2] = face[2];
+				nf2[0] = split.idxVert[2];
+				nf2[1] = face[1];
+				nf2[2] = split.idxVert[1];
+			}
+			break; }
+		case 3: {
+			// all three edges are split; create four triangles
+			// create the new triangle in the middle
+			Face& newface = faces.AddEmpty();
+			newface[0] = split.idxVert[0];
+			newface[1] = split.idxVert[1];
+			newface[2] = split.idxVert[2];
+			// create the last three faces, defined by one old and two new vertices
+			for (int i=0; i<3; ++i) {
+				Face& nf = faces.AddEmpty();
+				nf[0] = face[i];
+				nf[1] = newface[(i+2)%3];
+				nf[2] = newface[(i+1)%3];
+			}
+			break; }
+		}
+	}
+
+	// remove all faces that split
+	ASSERT(faces.GetSize()-(faces.GetCapacity()/3)/*initial size*/ > mapSplits.size());
+	for (const auto& s: mapSplits)
+		faces.RemoveAt(s.first);
+}
+/*----------------------------------------------------------------*/
+
+// decimate mesh by removing the given list of vertices
+//#define DECIMATE_JOINHOLES // not finished
+void Mesh::Decimate(VertexIdxArr& verticesRemove)
+{
+	ASSERT(vertices.GetSize() == vertexFaces.GetSize());
+	FaceIdxArr facesRemove(0, verticesRemove.GetSize()*8);
+	#ifdef DECIMATE_JOINHOLES
+	cList<VertexIdxArr> holes;
+	#endif
+	FOREACHPTR(pIdxV, verticesRemove) {
+		const VIndex idxV(*pIdxV);
+		ASSERT(idxV < vertices.GetSize());
+		// create the list of consecutive vertices around selected vertex
+		VertexIdxArr verts;
+		{
+			FaceIdxArr& vf(vertexFaces[idxV]);
+			if (vf.IsEmpty())
+				continue;
+			const FIndex n(vf.GetSize());
+			facesRemove.Join(vf);
+			ASSERT(verts.IsEmpty());
+			{
+				// add vertices of the first face
+				const Face& f = faces[vf.First()];
+				const uint32_t i(FindVertex(f, idxV));
+				verts.Insert(f[(i+1)%3]);
+				verts.Insert(f[(i+2)%3]);
+				vf.RemoveAt(0);
+			}
+			while (verts.GetSize() < n) {
+				// find the face that contains our vertex and the last added vertex
+				const VIndex idxVL(verts.Last());
+				FOREACH(idxF, vf) {
+					const Face& f = faces[vf[idxF]];
+					ASSERT(FindVertex(f, idxV) != NO_ID);
+					const uint32_t i(FindVertex(f, idxVL));
+					if (i == NO_ID)
+						continue;
+					// add the missing vertex at the end
+					ASSERT(f[(i+2)%3] == idxV);
+					const FIndex idxVN(f[(i+1)%3]);
+					ASSERT(verts.First() != idxVN);
+					verts.Insert(idxVN);
+					vf.RemoveAt(idxF);
+					goto NEXT_FACE_FORWARD;
+				}
+			#ifndef DECIMATE_JOINHOLES
+				vf.Release();
+				goto NEXT_VERTEX;
+				NEXT_FACE_FORWARD:;
+			}
+			vf.Release();
+			#else
+				break;
+				NEXT_FACE_FORWARD:;
+			}
+			while (!vf.IsEmpty()) {
+				// find the face that contains our vertex and the first added vertex
+				const VIndex idxVF(verts.First());
+				FOREACH(idxF, vf) {
+					const Face& f = faces[vf[idxF]];
+					ASSERT(FindVertex(f, idxV) != NO_ID);
+					const uint32_t i(FindVertex(f, idxVF));
+					if (i == NO_ID)
+						continue;
+					// add the missing vertex at the beginning
+					ASSERT(f[(i+1)%3] == idxV);
+					const FIndex idxVP(f[(i+2)%3]);
+					ASSERT(verts.Last() != idxVP || vf.GetSize() == 1);
+					if (verts.Last() != idxVP)
+						verts.InsertAt(0, idxVP);
+					vf.RemoveAt(idxF);
+					goto NEXT_FACE_BACKWARD;
+				}
+				vf.Release();
+				goto NEXT_VERTEX;
+				NEXT_FACE_BACKWARD:;
+			}
+			#endif
+		}
+		// remove the deleted faces from each vertex face list
+		FOREACHPTR(pV, verts) {
+			FaceIdxArr& vf(vertexFaces[*pV]);
+			RFOREACH(i, vf) {
+				const Face& f = faces[vf[i]];
+				if (FindVertex(f, idxV) != NO_ID)
+					vf.RemoveAt(i);
+			}
+		}
+		#ifdef DECIMATE_JOINHOLES
+		// find the hole that contains the vertex to be deleted
+		FOREACHPTR(pHole, holes) {
+			const VIndex idxVH(pHole->Find(idxV));
+			if (idxVH == VertexIdxArr::NO_INDEX)
+				continue;
+			// extend the hole with the new loop vertices
+			VertexIdxArr& hole(*pHole);
+			hole.RemoveAtMove(idxVH);
+			const VIndex idxS((idxVH+hole.GetSize()-1)%hole.GetSize());
+			const VIndex idxL(verts.Find(hole[idxS]));
+			ASSERT(idxL != VertexIdxArr::NO_INDEX);
+			ASSERT(verts[(idxL+verts.GetSize()-1)%verts.GetSize()] == hole[(idxS+1)%hole.GetSize()]);
+			const VIndex n(verts.GetSize()-2);
+			for (VIndex v=1; v<=n; ++v)
+				hole.InsertAt(idxS+v, verts[(idxL+v)%verts.GetSize()]);
+			goto NEXT_VERTEX;
+		}
+		// or create a new hole
+		if (verts.GetSize() < 3)
+			continue;
+		verts.Swap(holes.AddEmpty());
+		#else
+		// close the holes defined by the complete loop of consecutive vertices
+		// (the loop can be opened, cause some of the vertices can be on the border)
+		if (verts.GetSize() > 2)
+			CloseHoleQuality(verts);
+		#endif
+		NEXT_VERTEX:;
+	}
+	#ifndef _RELEASE
+	// check all removed vertices are completely disconnected from the mesh
+	FOREACHPTR(pIdxV, verticesRemove)
+		ASSERT(vertexFaces[*pIdxV].IsEmpty());
+	#endif
+
+	// remove deleted faces
+	RemoveFaces(facesRemove, true);
+
+	// remove deleted vertices
+	RemoveVertices(verticesRemove);
+
+	#ifdef DECIMATE_JOINHOLES
+	// close the holes defined by the complete loop of consecutive vertices
+	// (the loop can be opened, cause some of the vertices can be on the border)
+	FOREACHPTR(pHole, holes) {
+		ASSERT(pHole->GetSize() > 2);
+		CloseHoleQuality(*pHole);
+	}
+	#endif
+
+	#ifndef _RELEASE
+	// check all faces see valid vertices
+	FOREACH(idxF, faces) {
+		const Face& face = faces[idxF];
+		for (int v=0; v<3; ++v)
+			ASSERT(face[v] < vertices.GetSize());
+	}
+	#endif
+}
+/*----------------------------------------------------------------*/
+
+// given a hole defined by a complete loop of consecutive vertices,
+// split it recursively in two halves till the splits becomes a face
+void Mesh::CloseHole(VertexIdxArr& split0)
+{
+	ASSERT(split0.GetSize() >= 3);
+	if (split0.GetSize() == 3) {
+		const FIndex idxF(faces.GetSize());
+		faces.AddConstruct(split0[0], split0[1], split0[2]);
+		for (int v=0; v<3; ++v) {
+			#ifndef _RELEASE
+			FaceIdxArr indices;
+			GetAdjVertexFaces(split0[v], split0[(v+1)%3], indices);
+			ASSERT(indices.GetSize() < 2);
+			indices.Empty();
+			GetAdjVertexFaces(split0[v], split0[(v+2)%3], indices);
+			ASSERT(indices.GetSize() < 2);
+			#endif
+			vertexFaces[split0[v]].Insert(idxF);
+		}
+		return;
+	}
+	const VIndex i(split0.GetSize() >> 1);
+	const VIndex j(split0.GetSize()-i);
+	VertexIdxArr split1(0, j+1);
+	split1.Join(split0.Begin()+i, j);
+	split1.Insert(split0.First());
+	split0.RemoveLast(j-1);
+	CloseHole(split0);
+	CloseHole(split1);
+}
+
+// given a hole defined by a complete loop of consecutive vertices,
+// fills it using an heap to choose the best candidate face to be added
+void Mesh::CloseHoleQuality(VertexIdxArr& verts)
+{
+	struct CandidateFace
+	{
+		Face face;
+		float angle;
+		float dihedral;
+		float aspectRatio;
+
+		CandidateFace() {}
+		// the vertices of the given face must be in the order they appear on the border of the hole
+		// (the middle face vertex must be between the first and third on the border)
+		CandidateFace(VIndex v0, VIndex v1, VIndex v2, const Mesh& mesh) : face(v0,v1,v2) {
+			const Normal n(mesh.FaceNormal(face));
+			// compute the angle between the two existing edges of the face
+			// (the angle computation takes into account the case of reversed face)
+			angle = ACOS(ComputeAngle<float,float>(mesh.vertices[face[1]].ptr(), mesh.vertices[face[0]].ptr(), mesh.vertices[face[2]].ptr()));
+			if (n.dot(mesh.VertexNormal(face[1])) < 0)
+				angle = float(2*M_PI) - angle;
+			// compute quality as a composition of dihedral angle and area/sum(edge^2);
+			// the dihedral angle uses the normal of the edge faces
+			// which are possible not to exist if the edges are on the border
+			FaceIdxArr indices;
+			mesh.GetAdjVertexFaces(face[2], face[0], indices);
+			if (indices.GetSize() > 1) {
+				aspectRatio = -1;
+				return;
+			}
+			indices.Empty();
+			mesh.GetAdjVertexFaces(face[0], face[1], indices);
+			if (indices.GetSize() > 1) {
+				aspectRatio = -1;
+				return;
+			}
+			const FIndex i0(indices.GetSize());
+			mesh.GetAdjVertexFaces(face[1], face[2], indices);
+			if (indices.GetSize()-i0 > 1) {
+				aspectRatio = -1;
+				return;
+			}
+			if (indices.IsEmpty())
+				dihedral = FD2R(33.f);
+			else {
+				const Normal n0(mesh.FaceNormal(mesh.faces[indices[0]]));
+				if (indices.GetSize() == 1)
+					dihedral = ACOS(ComputeAngle<float,float>(n.ptr(), n0.ptr()));
+				else {
+					const Normal n1(mesh.FaceNormal(mesh.faces[indices[1]]));
+					dihedral = MAXF(ACOS(ComputeAngle<float,float>(n.ptr(), n0.ptr())), ACOS(ComputeAngle<float,float>(n.ptr(), n1.ptr())));
+				}
+			}
+			aspectRatio = ComputeTriangleQuality(mesh.vertices[face[0]], mesh.vertices[face[1]], mesh.vertices[face[2]]);
+		}
+
+		inline operator const Face&() const { return face; }
+		inline bool IsConcave() const { return angle > (float)M_PI; }
+		inline float GetQuality() const { return aspectRatio - 0.3f/*diedral weight*/*(dihedral/(float)M_PI); }
+
+		// In the heap, by default, we retrieve the LARGEST value,
+		// so if we need the ear with minimal dihedral angle, we must reverse the sign of the comparison.
+		// The concave elements must be all in the end of the heap, sorted accordingly,
+		// So if only one of the two ear is Concave that one is always the minimum one.
+		inline bool operator < (const CandidateFace& c) const {
+			if ( IsConcave() && !c.IsConcave()) return true;
+			if (!IsConcave() &&  c.IsConcave()) return false;
+			return GetQuality() < c.GetQuality();
+		}
+	};
+
+	// create the initial list of new possible face along the edge of the hole
+	ASSERT(verts.GetSize() > 2);
+	cList<CandidateFace> candidateFaces(0, verts.GetSize());
+	FOREACH(v, verts) {
+		if (candidateFaces.AddConstruct(verts[v], verts[(v+1)%verts.GetSize()], verts[(v+2)%verts.GetSize()], *this).aspectRatio < 0)
+			candidateFaces.RemoveLast();
+	}
+	candidateFaces.Sort();
+
+	// add new faces until there are only two vertices left
+	while(true) {
+		// add the best candidate face
+		ASSERT(!candidateFaces.IsEmpty());
+		const Face& candidateFace = candidateFaces.Last();
+		ASSERT(verts.Find(candidateFace[0]) != VertexIdxArr::NO_INDEX);
+		ASSERT(verts.Find(candidateFace[1]) != VertexIdxArr::NO_INDEX);
+		ASSERT(verts.Find(candidateFace[2]) != VertexIdxArr::NO_INDEX);
+		const FIndex idxF(faces.GetSize());
+		faces.Insert(candidateFace);
+		for (int v=0; v<3; ++v) {
+			#ifndef _RELEASE
+			FaceIdxArr indices;
+			GetAdjVertexFaces(candidateFace[v], candidateFace[(v+1)%3], indices);
+			ASSERT(indices.GetSize() < 2);
+			indices.Empty();
+			GetAdjVertexFaces(candidateFace[v], candidateFace[(v+2)%3], indices);
+			ASSERT(indices.GetSize() < 2);
+			#endif
+			vertexFaces[candidateFace[v]].Insert(idxF);
+		}
+		if (verts.GetSize() <= 3)
+			break;
+		const VIndex idxV(verts.Find(candidateFace[1]));
+		// remove all candidate face containing this vertex
+		{
+		candidateFaces.RemoveLast();
+		const VIndex idxVert(verts[idxV]);
+		int n(0);
+		RFOREACH(c, candidateFaces)
+			if (FindVertex(candidateFaces[c].face, idxVert) != NO_ID) {
+				candidateFaces.RemoveAtMove(c);
+				if (++n == 2)
+					break;
+			}
+		}
+		// insert the two new candidate faces
+		const VIndex idxB(idxV+verts.GetSize());
+		const VIndex idxVB2(verts[(idxB-2)%verts.GetSize()]);
+		const VIndex idxVB1(verts[(idxB-1)%verts.GetSize()]);
+		const VIndex idxVF1(verts[(idxV+1)%verts.GetSize()]);
+		const VIndex idxVF2(verts[(idxV+2)%verts.GetSize()]);
+		{
+			const CandidateFace newCandidateFace(idxVB2, idxVB1, idxVF1, *this);
+			if (newCandidateFace.aspectRatio >= 0)
+				candidateFaces.InsertSort(newCandidateFace);
+		}
+		{
+			const CandidateFace newCandidateFace(idxVB1, idxVF1, idxVF2, *this);
+			if (newCandidateFace.aspectRatio >= 0)
+				candidateFaces.InsertSort(newCandidateFace);
+		}
+		verts.RemoveAtMove(idxV);
+	}
+}
+/*----------------------------------------------------------------*/
+
+// remove the given list of faces
+void Mesh::RemoveFaces(FaceIdxArr& facesRemove, bool bUpdateLists)
+{
+	facesRemove.Sort();
+	FIndex idxLast(FaceIdxArr::NO_INDEX);
+	if (!bUpdateLists || vertexFaces.IsEmpty()) {
+		RFOREACHPTR(pIdxF, facesRemove) {
+			const FIndex idxF(*pIdxF);
+			if (idxLast == idxF)
+				continue;
+			faces.RemoveAt(idxF);
+			idxLast = idxF;
+		}
+	} else {
+		ASSERT(vertices.GetSize() == vertexFaces.GetSize());
+		RFOREACHPTR(pIdxF, facesRemove) {
+			const FIndex idxF(*pIdxF);
+			if (idxLast == idxF)
+				continue;
+			{
+				// remove face from vertex face list
+				const Face& face = faces[idxF];
+				for (int v=0; v<3; ++v) {
+					const VIndex idxV(face[v]);
+					FaceIdxArr& vf(vertexFaces[idxV]);
+					const FIndex idx(vf.Find(idxF));
+					if (idx != FaceIdxArr::NO_INDEX)
+						vf[idx] = idxF;
+				}
+			}
+			const FIndex idxFM(faces.GetSize()-1);
+			if (idxF < idxFM) {
+				// update all vertices of the moved face
+				const Face& face = faces[idxFM];
+				for (int v=0; v<3; ++v) {
+					const VIndex idxV(face[v]);
+					FaceIdxArr& vf(vertexFaces[idxV]);
+					const FIndex idx(vf.Find(idxFM));
+					if (idx != FaceIdxArr::NO_INDEX)
+						vf[idx] = idxF;
+				}
+			}
+			faces.RemoveAt(idxF);
+			idxLast = idxF;
+		}
+	}
+	vertexVertices.Release();
+}
+/*----------------------------------------------------------------*/
+
+// remove the given list of vertices
+void Mesh::RemoveVertices(VertexIdxArr& vertexRemove, bool bUpdateLists)
+{
+	ASSERT(vertices.GetSize() == vertexFaces.GetSize());
+	vertexRemove.Sort();
+	VIndex idxLast(VertexIdxArr::NO_INDEX);
+	if (!bUpdateLists) {
+		RFOREACHPTR(pIdxV, vertexRemove) {
+			const VIndex idxV(*pIdxV);
+			if (idxLast == idxV)
+				continue;
+			const VIndex idxVM(vertices.GetSize()-1);
+			if (idxV < idxVM) {
+				// update all faces of the moved vertex
+				const FaceIdxArr& vf(vertexFaces[idxVM]);
+				FOREACHPTR(pIdxF, vf)
+					GetVertex(faces[*pIdxF], idxVM) = idxV;
+			}
+			vertexFaces.RemoveAt(idxV);
+			vertices.RemoveAt(idxV);
+			idxLast = idxV;
+		}
+		return;
+	}
+	FaceIdxArr facesRemove;
+	RFOREACHPTR(pIdxV, vertexRemove) {
+		const VIndex idxV(*pIdxV);
+		if (idxLast == idxV)
+			continue;
+		const VIndex idxVM(vertices.GetSize()-1);
+		if (idxV < idxVM) {
+			// update all faces of the moved vertex
+			const FaceIdxArr& vf(vertexFaces[idxVM]);
+			FOREACHPTR(pIdxF, vf)
+				GetVertex(faces[*pIdxF], idxVM) = idxV;
+		}
+		if (!vertexFaces.IsEmpty()) {
+			facesRemove.Join(vertexFaces[idxV]);
+			vertexFaces.RemoveAt(idxV);
+		}
+		if (!vertexVertices.IsEmpty())
+			vertexVertices.RemoveAt(idxV);
+		vertices.RemoveAt(idxV);
+		idxLast = idxV;
+	}
+	RemoveFaces(facesRemove);
+}
+/*----------------------------------------------------------------*/
 
 
 #ifdef _USE_CUDA
@@ -2602,13 +3246,11 @@ bool Mesh::InitKernels(int device)
 			".target sm_20\n"
 			".address_size 64\n"
 			"\n"
-			"	// .globl	" FUNC "\n"
-			"\n"
 			".visible .entry " FUNC "(\n"
-			"	.param .u64 " FUNC "_param_1, // array vertices (float*3 * numVertices)\n"
-			"	.param .u64 " FUNC "_param_2, // array faces (uint32_t*3 * numFaces)\n"
-			"	.param .u64 " FUNC "_param_3, // array normals (float*3 * numFaces)\n"
-			"	.param .u32 " FUNC "_param_4  // numFaces = numNormals (uint32_t)\n"
+			"	.param .u64 .ptr param_1, // array vertices (float*3 * numVertices)\n"
+			"	.param .u64 .ptr param_2, // array faces (uint32_t*3 * numFaces)\n"
+			"	.param .u64 .ptr param_3, // array normals (float*3 * numFaces) [out]\n"
+			"	.param .u32 param_4 // numFaces = numNormals (uint32_t)\n"
 			")\n"
 			"{\n"
 			"	.reg .f32 %f<32>;\n"
@@ -2616,10 +3258,10 @@ bool Mesh::InitKernels(int device)
 			"	.reg .u32 %r<17>;\n"
 			"	.reg .u64 %rl<18>;\n"
 			"\n"
-			"	ld.param.u64 %rl4, [" FUNC "_param_1];\n"
-			"	ld.param.u64 %rl5, [" FUNC "_param_2];\n"
-			"	ld.param.u64 %rl6, [" FUNC "_param_3];\n"
-			"	ld.param.u32 %r2,  [" FUNC "_param_4];\n"
+			"	ld.param.u64 %rl4, [param_1];\n"
+			"	ld.param.u64 %rl5, [param_2];\n"
+			"	ld.param.u64 %rl6, [param_3];\n"
+			"	ld.param.u32 %r2,  [param_4];\n"
 			"	cvta.to.global.u64 %rl1, %rl6;\n"
 			"	cvta.to.global.u64 %rl2, %rl4;\n"
 			"	cvta.to.global.u64 %rl3, %rl5;\n"

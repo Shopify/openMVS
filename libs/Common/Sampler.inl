@@ -1,4 +1,3 @@
-
 // Copyright (c) 2012-2015 OpenMVG.
 // Copyright (c) 2012-2015 Pierre MOULON.
 // Copyright (c) 2015 Romuald Perrot.
@@ -7,6 +6,8 @@
 // This Source Code Form is subject to the terms of the Mozilla Public
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at http://mozilla.org/MPL/2.0/.
+
+namespace Sampler {
 
 // Sampling functors
 // These functors computes weight associated to each pixels
@@ -28,7 +29,6 @@
 //   @param x Sampling position
 //   @param[out] weigth Sampling factors associated to the neighboring
 //   @note weight must be at least width length
-namespace Sampler {
 // Linear sampling (ie: linear interpolation between two pixels)
 template <typename TYPE>
 struct Linear {
@@ -42,6 +42,7 @@ struct Linear {
 		weigth[1] = x;
 	}
 };
+
 // Cubic interpolation between 4 pixels
 //
 // Interpolation weight is for A,B,C and D pixels given a x position as illustrated as follow :
@@ -95,6 +96,7 @@ struct Cubic {
 		return (((TYPE(5)-x)*x - TYPE(8))*x + TYPE(4))*sharpness;
 	}
 };
+
 // Sampler spline16 -> Interpolation on 4 points used for 2D ressampling (16 = 4x4 sampling)
 // Cubic interpolation with 0-derivative at edges (ie at A and D points)
 // See Helmut Dersch for more details
@@ -171,6 +173,7 @@ struct Spline16 {
 		weigth[3] = ((TYPE(1) / TYPE(3) * x - TYPE(1) / TYPE(5)) * x - TYPE(2) / TYPE(15)) * x;
 	}
 };
+
 // Sampler spline 36
 // Same as spline 16 but on 6 neighbors (used for 6x6 frame)
 template <typename TYPE>
@@ -189,6 +192,7 @@ struct Spline36 {
 		weigth[5] = ((TYPE(-1) / TYPE(11) * x + TYPE(12) / TYPE(209)) * x + TYPE(7) / TYPE(209)) * x;
 	}
 };
+
 // Sampler spline 64
 // Same as spline 16 but on 8 neighbors (used for 8x8 frame)
 template <typename TYPE>
@@ -209,19 +213,16 @@ struct Spline64 {
 		weigth[7] = ((TYPE(1) / TYPE(41) * x - TYPE(45) / TYPE(2911)) * x - TYPE(26) / TYPE(2911)) * x;
 	}
 };
-} // namespace Sampler
+
 // Sample image at a specified position
+// @param image to be sampled
 // @param sampler used to make the sampling
 // @param pt X and Y-coordinate of sampling
-// @return Sampled value
-template <typename TYPE>
-template <typename SAMPLER, typename INTERTYPE>
-INTERTYPE TImage<TYPE>::sample(const SAMPLER& sampler, const TPoint2<typename SAMPLER::Type>& pt) const
+// @return sampled value
+template <typename IMAGE, typename SAMPLER, typename POINT, typename TYPE>
+inline TYPE Sample(const IMAGE& image, const SAMPLER& sampler, const POINT& pt)
 {
 	typedef typename SAMPLER::Type T;
-
-	const int im_width(width());
-	const int im_height(height());
 
 	// integer position of sample (x,y)
 	const int grid_x(FLOOR2INT(pt.x));
@@ -238,33 +239,35 @@ INTERTYPE TImage<TYPE>::sample(const SAMPLER& sampler, const TPoint2<typename SA
 	sampler(dy, coefs_y);
 
 	// Sample a grid around specified grid point
-	INTERTYPE res(0);
+	TYPE res(0);
 	T total_weight(0);
 	for (int i = 0; i < SAMPLER::width; ++i) {
 		// get current i value
 		// +1 for correct scheme (draw it to be convinced)
 		const int cur_i(grid_y + 1 + i - SAMPLER::halfWidth);
 		// handle out of range
-		if (cur_i < 0 || cur_i >= im_height)
+		if (cur_i < 0 || cur_i >= image.rows)
 			continue;
 		for (int j = 0; j < SAMPLER::width; ++j) {
 			// get current j value
 			// +1 for the same reason
 			const int cur_j(grid_x + 1 + j - SAMPLER::halfWidth);
 			// handle out of range
-			if (cur_j < 0 || cur_j >= im_width)
+			if (cur_j < 0 || cur_j >= image.cols)
 				continue;
 			// sample input image and weight according to sampler
 			const T w(coefs_x[j] * coefs_y[i]);
-			res += INTERTYPE(BaseBase::operator()(cur_i, cur_j)) * w;
+			res += TYPE(image(cur_i, cur_j)) * w;
 			total_weight += w;
 		}
 	}
-
-	// if value too small, it should be instable, so return the sampled value
+	// if the weight is too small, the result is unstable
 	if (total_weight <= T(0.2))
-		return INTERTYPE();
-	if (total_weight != T(1))
-		return res/total_weight;
-	return res;
+		return TYPE();
+
+	if (ISEQUAL(total_weight, T(1)))
+		return res;
+	return res/total_weight;
 }
+
+} // namespace Sampler

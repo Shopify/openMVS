@@ -23,8 +23,11 @@ namespace CUDA {
 Devices devices;
 
 // GPU Architecture definitions
-int convertSMVer2Cores(int major, int minor)
+int _convertSMVer2Cores(int major, int minor)
 {
+	if (major == 9999 && minor == 9999)
+		return 1;
+
 	// Defines for GPU Architecture types (using the SM version to determine the # of cores per SM
 	struct sSMtoCores {
 		int SM; // 0xMm (hexidecimal notation), M = SM Major version, and m = SM minor version
@@ -54,153 +57,134 @@ int convertSMVer2Cores(int major, int minor)
 	return nGpuArchCoresPerSM[index-1].Cores;
 }
 
-#ifdef __CUDA_RUNTIME_H__
 // checks that the given device ID is valid;
-// return the device ID if successful
-int gpuCheckDeviceId(int devID)
+// if successful returns the device info in the given structure
+CUresult _gpuCheckDeviceId(int devID, Device& device)
 {
 	int device_count;
-	checkCudaErrors(cudaGetDeviceCount(&device_count));
+	checkCudaError(cuDeviceGetCount(&device_count));
 	if (device_count == 0) {
 		VERBOSE("CUDA error: no devices supporting CUDA");
-		return -1;
+		return CUDA_ERROR_NO_DEVICE;
 	}
 	if (devID < 0)
 		devID = 0;
-	if (devID > device_count-1) {
+	if (devID >= device_count) {
 		VERBOSE("CUDA error: device [%d] is not a valid GPU device (%d CUDA capable GPU device(s) detected)", devID, device_count);
-		return -1;
+		return CUDA_ERROR_INVALID_DEVICE;
 	}
-	cudaDeviceProp deviceProp;
-	checkCudaErrors(cudaGetDeviceProperties(&deviceProp, devID));
-	if (deviceProp.computeMode == cudaComputeModeProhibited) {
-		VERBOSE("CUDA error: device is running in <Compute Mode Prohibited>, no threads can use ::cudaSetDevice()");
-		return -1;
+	checkCudaError(cuDeviceGetAttribute(&device.computeMode, CU_DEVICE_ATTRIBUTE_COMPUTE_MODE, devID));
+	if (device.computeMode == CU_COMPUTEMODE_PROHIBITED) {
+		VERBOSE("CUDA error: device is running in <Compute Mode Prohibited>");
+		return CUDA_ERROR_PROFILER_DISABLED;
 	}
-	if (deviceProp.major < 1) {
+	checkCudaError(cuDeviceComputeCapability(&device.major, &device.minor, devID));
+	if (device.major < 1) {
 		VERBOSE("CUDA error: GPU device does not support CUDA");
-		return -1;
+		return CUDA_ERROR_INVALID_DEVICE;
 	}
-	checkCudaErrors(cudaSetDevice(devID));
-	return devID;
+	checkCudaError(cuDeviceGetProperties(&device.prop, devID));
+	device.ID = (CUdevice)devID;
+	return CUDA_SUCCESS;
 }
 
 // finds the best GPU (with maximum GFLOPS);
-// return the device ID if successful
-int gpuGetMaxGflopsDeviceId()
+// if successful returns the device info in the given structure
+CUresult _gpuGetMaxGflopsDeviceId(Device& bestDevice)
 {
-	int current_device     = 0, sm_per_multiproc  = 0;
-	int max_perf_device    = 0;
-	int device_count       = 0, best_SM_arch      = 0;
-	int devices_prohibited = 0;
-
-	unsigned long long max_compute_perf = 0;
-	cudaDeviceProp deviceProp;
-	cudaGetDeviceCount(&device_count);
-
-	checkCudaErrors(cudaGetDeviceCount(&device_count));
+	int device_count = 0;
+	checkCudaError(cuDeviceGetCount(&device_count));
 	if (device_count == 0) {
 		VERBOSE("CUDA error: no devices supporting CUDA");
-		return -1;
+		return CUDA_ERROR_NO_DEVICE;
 	}
 
 	// Find the best major SM Architecture GPU device
-	while (current_device < device_count) {
-		cudaGetDeviceProperties(&deviceProp, current_device);
-
+	Devices devices;
+	int best_SM_arch = 0;
+	for (int current_device = 0; current_device < device_count; ++current_device) {
+		Device device;
+		if (reportCudaError(cuDeviceGetAttribute(&device.computeMode, CU_DEVICE_ATTRIBUTE_COMPUTE_MODE, current_device)) != CUDA_SUCCESS)
+			continue;
 		// If this GPU is not running on Compute Mode prohibited, then we can add it to the list
-		if (deviceProp.computeMode != cudaComputeModeProhibited) {
-			if (deviceProp.major > 0 && deviceProp.major < 9999) {
-				best_SM_arch = MAX(best_SM_arch, deviceProp.major);
-			}
-		} else {
-			devices_prohibited++;
+		if (device.computeMode == CU_COMPUTEMODE_PROHIBITED)
+			continue;
+		if (reportCudaError(cuDeviceComputeCapability(&device.major, &device.minor, current_device)) != CUDA_SUCCESS)
+			continue;
+		if (device.major > 0 && device.major < 9999) {
+			best_SM_arch = MAXF(best_SM_arch, device.major);
+			device.ID = (CUdevice)current_device;
+			devices.Insert(device);
 		}
-
-		current_device++;
 	}
-
-	if (devices_prohibited == device_count) {
+	if (devices.IsEmpty()) {
 		VERBOSE("CUDA error: all devices have compute mode prohibited");
-		return -1;
+		return CUDA_ERROR_PROFILER_DISABLED;
 	}
 
 	// Find the best CUDA capable GPU device
-	current_device = 0;
-
-	while (current_device < device_count) {
-		cudaGetDeviceProperties(&deviceProp, current_device);
-
-		// If this GPU is not running on Compute Mode prohibited, then we can add it to the list
-		if (deviceProp.computeMode != cudaComputeModeProhibited) {
-			if (deviceProp.major == 9999 && deviceProp.minor == 9999) {
-				sm_per_multiproc = 1;
-			} else {
-				sm_per_multiproc = convertSMVer2Cores(deviceProp.major, deviceProp.minor);
-			}
-
-			unsigned long long compute_perf  = (unsigned long long) deviceProp.multiProcessorCount * sm_per_multiproc * deviceProp.clockRate;
-
-			if (compute_perf  > max_compute_perf) {
-				// If we find GPU with SM major > 2, search only these
-				if (best_SM_arch > 2) {
-					// If our device==dest_SM_arch, choose this, or else pass
-					if (deviceProp.major == best_SM_arch) {
-						max_compute_perf  = compute_perf;
-						max_perf_device   = current_device;
-					}
-				} else {
-					max_compute_perf  = compute_perf;
-					max_perf_device   = current_device;
-				}
-			}
+	Device* max_perf_device = NULL;
+	size_t max_compute_perf = 0;
+	FOREACHPTR(pDevice, devices) {
+		ASSERT(pDevice->computeMode != CU_COMPUTEMODE_PROHIBITED);
+		int sm_per_multiproc = _convertSMVer2Cores(pDevice->major, pDevice->minor);
+		int multiProcessorCount;
+		if (reportCudaError(cuDeviceGetAttribute(&multiProcessorCount, CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT, (CUdevice)pDevice->ID)) != CUDA_SUCCESS)
+			continue;
+		int clockRate;
+		if (reportCudaError(cuDeviceGetAttribute(&clockRate, CU_DEVICE_ATTRIBUTE_CLOCK_RATE, pDevice->ID)) != CUDA_SUCCESS)
+			continue;
+		size_t compute_perf = (size_t)multiProcessorCount * sm_per_multiproc * clockRate;
+		if (compute_perf > max_compute_perf &&
+			(best_SM_arch < 3 || // if we find GPU with SM major > 2, search only these
+			 pDevice->major == best_SM_arch) ) // if our device==dest_SM_arch, choose this, or else pass
+		{
+			max_compute_perf = compute_perf;
+			max_perf_device  = pDevice;
 		}
-
-		++current_device;
 	}
+	if (max_perf_device == NULL)
+		return CUDA_ERROR_INVALID_DEVICE;
 
-	return max_perf_device;
+	bestDevice = *max_perf_device;
+	checkCudaError(cuDeviceGetProperties(&bestDevice.prop, bestDevice.ID));
+	return CUDA_SUCCESS;
 }
 
 // initialize the given CUDA device and add it to the array of initialized devices;
 // if the given device is -1, the best available device is selected
 CUresult initDevice(int deviceID)
 {
-	Device device;
+	checkCudaError(cuInit(0));
 
+	Device device;
 	if (deviceID >= 0) {
-		device.ID = gpuCheckDeviceId(deviceID);
+		checkCudaError(_gpuCheckDeviceId(deviceID, device));
 	} else {
 		// Otherwise pick the device with the highest Gflops/s
-		device.ID = gpuGetMaxGflopsDeviceId();
+		checkCudaError(_gpuGetMaxGflopsDeviceId(device));
 	}
-	if (device.ID < 0) {
-		VERBOSE("error: no CUDA capable devices found");
-		return CUDA_ERROR_NO_DEVICE;
-	}
-	checkCudaErrors(cudaSetDevice(device.ID));
-
-	checkCudaErrors(cudaGetDeviceProperties(&device.prop, device.ID));
-	if (device.prop.major < 2) {
-		VERBOSE("CUDA error: compute capability 2.0 or greater required (available %d.%d for device[%d])", device.ID, device.prop.major, device.prop.minor);
+	if (device.major < 3) {
+		VERBOSE("CUDA error: compute capability 3.2 or greater required (available %d.%d for device[%d])", device.ID, device.major, device.minor);
 		return CUDA_ERROR_INVALID_DEVICE;
 	}
 	devices.Insert(device);
-	DEBUG("CUDA device[%d] initialized: %s (Compute Capability %d.%d)", device.ID, device.prop.name, device.prop.major, device.prop.minor);
+	checkCudaError(cuCtxCreate(&devices.Last().ctx, CU_CTX_SCHED_AUTO, device.ID));
 
-	#if 1
-	// dummy memory allocation to work around a bug inside CUDA
-	// (this seems to initialize some more things)
-	void* cpDummy;
-	cudaMalloc(&cpDummy, sizeof(int));
-	cudaFree(cpDummy);
+	#if TD_VERBOSE != TD_VERBOSE_OFF
+	char name[2048];
+	checkCudaError(cuDeviceGetName(name, 2048, device.ID));
+	size_t memSize;
+	checkCudaError(cuDeviceTotalMem(&memSize, device.ID));
+	DEBUG("CUDA device %d initialized: %s (compute capability %d.%d; memory %s)", device.ID, name, device.major, device.minor, Util::formatBytes(memSize).c_str());
 	#endif
 	return CUDA_SUCCESS;
 }
 
-// load/read kernel from 'program' file/string, compile and return the requested function
-CUresult ptxJIT(const char* program, const char* functionName, CUmodule *phModule, CUfunction *phKernel, CUlinkState *lState, bool bFromFile)
+// load/read module (program) from file/string and compile it
+CUresult ptxJIT(LPCSTR program, CUmodule& hModule, int mode)
 {
+	CUlinkState lState;
 	CUjit_option options[6];
 	void *optionVals[6];
 	float walltime(0);
@@ -230,104 +214,208 @@ CUresult ptxJIT(const char* program, const char* functionName, CUmodule *phModul
 	optionVals[5] = (void*)1;
 
 	// Create a pending linker invocation
-	checkCudaErrors(cuLinkCreate(6, options, optionVals, lState));
+	checkCudaError(cuLinkCreate(6, options, optionVals, &lState));
 
-	DEBUG("Loading '%s' program", functionName);
+	const size_t programLen(strlen(program));
 	CUresult myErr;
-	if (bFromFile) {
-		// Load the PTX from the file (64-bit)
-		myErr = cuLinkAddFile(*lState, CU_JIT_INPUT_PTX, program, 0, 0, 0);
+	if (mode == JIT::FILE || (mode == JIT::AUTO && programLen < 256)) {
+		// Load the PTX from the file
+		myErr = cuLinkAddFile(lState, CU_JIT_INPUT_PTX, program, 0, 0, 0);
 	} else {
-		// Load the PTX from the string myPtx (64-bit)
-		myErr = cuLinkAddData(*lState, CU_JIT_INPUT_PTX, (void*)program, strlen(program)+1, 0, 0, 0, 0);
+		// Load the PTX from the string
+		myErr = cuLinkAddData(lState, CU_JIT_INPUT_PTX, (void*)program, programLen+1, 0, 0, 0, 0);
 	}
 	if (myErr != CUDA_SUCCESS) {
-		// Errors will be put in error_log, per CU_JIT_ERROR_LOG_BUFFER option above.
+		// Errors will be put in error_log, per CU_JIT_ERROR_LOG_BUFFER option above
 		VERBOSE("PTX Linker Error: %s", error_log);
 		return myErr;
 	}
 
 	// Complete the linker step
-	checkCudaErrors(cuLinkComplete(*lState, &cuOut, &outSize));
+	checkCudaError(cuLinkComplete(lState, &cuOut, &outSize));
 
-	// Linker walltime and info_log were requested in options above.
-	DEBUG("CUDA link completed (%gms):\n%s", walltime, info_log);
+	// Linker walltime and info_log were requested in options above
+	DEBUG_LEVEL(3, "CUDA link completed (%gms):\n%s", walltime, info_log);
 
 	// Load resulting cuBin into module
-	checkCudaErrors(cuModuleLoadData(phModule, cuOut));
-
-	// Locate the kernel entry point
-	checkCudaErrors(cuModuleGetFunction(phKernel, *phModule, functionName));
+	checkCudaError(cuModuleLoadData(&hModule, cuOut));
 
 	// Destroy the linker invocation
-	checkCudaErrors(cuLinkDestroy(*lState));
+	return reportCudaError(cuLinkDestroy(lState));
+}
+
+// requested function (kernel) from module (program)
+CUresult ptxGetFunc(const CUmodule& hModule, LPCSTR functionName, CUfunction& hKernel)
+{
+	// Locate the kernel entry point
+	checkCudaError(cuModuleGetFunction(&hKernel, hModule, functionName));
+	DEBUG_LEVEL(3, "Kernel '%s' loaded", functionName);
 	return CUDA_SUCCESS;
 }
 /*----------------------------------------------------------------*/
 
 
+void MemDevice::Release() {
+	if (pData) {
+		reportCudaError(cuMemFree(pData));
+		pData = 0;
+	}
+}
+CUresult MemDevice::Reset(size_t size) {
+	if (pData) {
+		if (nSize == size)
+			return CUDA_SUCCESS;
+		Release();
+	}
+	if (cuMemAlloc(&pData, size) != CUDA_SUCCESS) {
+		pData = 0;
+		return CUDA_ERROR_OUT_OF_MEMORY;
+	}
+	nSize = size;
+	return CUDA_SUCCESS;
+}
+CUresult MemDevice::Reset(const void* pDataHost, size_t size) {
+	if (pData && nSize != size)
+		Release();
+	if (!pData && cuMemAlloc(&pData, size) != CUDA_SUCCESS) {
+		pData = 0;
+		return CUDA_ERROR_OUT_OF_MEMORY;
+	}
+	nSize = size;
+	return cuMemcpyHtoD(pData, pDataHost, size);
+}
 
-#ifdef _SUPPORT_CPP11
-void KernelRT::Release() {
-	Reset();
+CUresult MemDevice::SetData(const void* pDataHost, size_t size) {
+	ASSERT(IsValid());
+	return cuMemcpyHtoD(pData, pDataHost, size);
+}
+
+CUresult MemDevice::GetData(void* pDataHost, size_t size) const {
+	ASSERT(IsValid());
+	return cuMemcpyDtoH(pDataHost, pData, size);
+}
+/*----------------------------------------------------------------*/
+
+
+void EventRT::Release() {
+	if (hEvent) {
+		reportCudaError(cuEventDestroy(hEvent));
+		hEvent = NULL;
+	}
+}
+CUresult EventRT::Reset(unsigned flags) {
+	CUresult ret(cuEventCreate(&hEvent, flags));
+	if (ret != CUDA_SUCCESS)
+		hEvent = NULL;
+	return ret;
+}
+/*----------------------------------------------------------------*/
+
+
+void StreamRT::Release() {
+	if (hStream) {
+		reportCudaError(cuStreamDestroy(hStream));
+		hStream = NULL;
+	}
+}
+CUresult StreamRT::Reset(unsigned flags) {
+	CUresult ret(cuStreamCreate(&hStream, flags));
+	if (ret != CUDA_SUCCESS)
+		hStream = NULL;
+	return ret;
+}
+
+CUresult StreamRT::Wait(CUevent hEvent) {
+	ASSERT(IsValid());
+	return cuStreamWaitEvent(hStream, hEvent, 0);
+}
+/*----------------------------------------------------------------*/
+
+
+void ModuleRT::Release() {
 	if (hModule) {
-		cuModuleUnload(hModule);
+		reportCudaError(cuModuleUnload(hModule));
 		hModule = NULL;
 	}
 }
-void KernelRT::Reset() {
-	paramOffset = 0;
-	FOREACHPTR(ptrData, inDatas)
-		cudaFree(*ptrData);
-	inDatas.Empty();
-	FOREACHPTR(ptrData, outDatas)
-		cudaFree(*ptrData);
-	outDatas.Empty();
-}
-CUresult KernelRT::Reset(LPCSTR program, LPCSTR functionName, bool bFromFile) {
-	// JIT Compile the Kernel from PTX and get the Handles (Driver API)
-	CUresult result(ptxJIT(program, functionName, &hModule, &hKernel, &lState, bFromFile));
+CUresult ModuleRT::Reset(LPCSTR program, int mode) {
+	// compile the module (program) from PTX and get its handle (Driver API)
+	CUresult result(ptxJIT(program, hModule, mode));
 	if (result != CUDA_SUCCESS)
 		hModule = NULL;
 	return result;
+}
+/*----------------------------------------------------------------*/
+
+
+void KernelRT::Release() {
+	inDatas.Release();
+	outDatas.Release();
+	ptrModule.Release();
+	hKernel = NULL;
+}
+void KernelRT::Reset() {
+	paramOffset = 0;
+	inDatas.Empty();
+	outDatas.Empty();
+}
+CUresult KernelRT::Reset(LPCSTR functionName) {
+	// get the function handle (Driver API)
+	ASSERT(ptrModule != NULL && ptrModule->IsValid());
+	CUresult result(ptxGetFunc(*ptrModule, functionName, hKernel));
+	if (result != CUDA_SUCCESS) {
+		ptrModule.Release();
+		hKernel = NULL;
+	}
+	return result;
+}
+CUresult KernelRT::Reset(const ModuleRTPtr& _ptrModule, LPCSTR functionName) {
+	// set module
+	ptrModule = _ptrModule;
+	// set function
+	return Reset(functionName);
+}
+CUresult KernelRT::Reset(LPCSTR program, LPCSTR functionName, int mode) {
+	// compile the module (program) from PTX and get the function handle (Driver API)
+	ptrModule = new ModuleRT(program, mode);
+	if (!ptrModule->IsValid()) {
+		ptrModule.Release();
+		hKernel = NULL;
+		return CUDA_ERROR_INVALID_HANDLE;
+	}
+	return Reset(functionName);
 }
 
 
 // append a generic input parameter (allocate&copy input buffer)
 CUresult KernelRT::_AddParam(const InputParam& param) {
-	void*& data = inDatas.AddEmpty();
-	if (cudaMalloc(&data, param.size) != cudaSuccess)
+	MemDevice& data = inDatas.AddEmpty();
+	if (data.Reset(param.data, param.size) != CUDA_SUCCESS)
 		return CUDA_ERROR_OUT_OF_MEMORY;
-	if (cudaMemcpy(data, param.data, param.size, cudaMemcpyHostToDevice) != cudaSuccess)
-		return CUDA_ERROR_INVALID_VALUE;
-	return addKernelParam(hKernel, paramOffset, data);
+	return addKernelParam(hKernel, paramOffset, (CUdeviceptr)data);
 }
 // append a generic output parameter (allocate output buffer)
 CUresult KernelRT::_AddParam(const OutputParam& param) {
-	void*& data = outDatas.AddEmpty();
-	if (cudaMalloc(&data, param.size) != cudaSuccess)
+	MemDevice& data = outDatas.AddEmpty();
+	if (data.Reset(param.size) != CUDA_SUCCESS)
 		return CUDA_ERROR_OUT_OF_MEMORY;
-	return addKernelParam(hKernel, paramOffset, data);
+	return addKernelParam(hKernel, paramOffset, (CUdeviceptr)data);
 }
 
 
 // copy result from the given output parameter index back to the host
-CUresult KernelRT::GetResult(int idx, const ReturnParam& param) {
-	return (cudaMemcpy(param.data, outDatas[idx], param.size, cudaMemcpyDeviceToHost) == cudaSuccess) ?
-		CUDA_SUCCESS : CUDA_ERROR_INVALID_VALUE;
+CUresult KernelRT::GetResult(const CUdeviceptr data, const ReturnParam& param) const {
+	return fetchMemDevice(param.data, param.size, data);
 }
 // read from the device the variadic output parameters
-CUresult KernelRT::GetResult(const std::initializer_list<ReturnParam>& params) {
-	IDX idx(0);
+CUresult KernelRT::GetResult(const std::initializer_list<ReturnParam>& params) const {
+	MemDeviceArr::IDX idx(0);
 	for (auto param : params)
-		if (cudaMemcpy(param.data, outDatas[idx++], param.size, cudaMemcpyDeviceToHost) != cudaSuccess)
+		if (outDatas[idx++].GetData(param.data, param.size) != CUDA_SUCCESS)
 			return CUDA_ERROR_INVALID_VALUE;
 	return CUDA_SUCCESS;
 }
 /*----------------------------------------------------------------*/
-#endif // _SUPPORT_CPP11
-
-#endif // __CUDA_RUNTIME_H__
 
 } // namespace CUDA
 

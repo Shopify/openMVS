@@ -205,6 +205,20 @@ bool CheckCollinearity(const TPoint3<TYPE>* ptr, int count, bool checkPartialSub
 /*----------------------------------------------------------------*/
 
 
+// compute the corresponding ray for a given projection matrix P[3,4] and image point pt[2,1]
+// output ray[3,1]
+template<typename TYPE1, typename TYPE2>
+inline void RayPoint_3x4_2_3(const TYPE1* P, const TYPE2* pt, TYPE1* ray) {
+	Eigen::Map< const Eigen::Matrix<TYPE1,3,4> > mP(P);
+	const Eigen::Matrix<TYPE1,3,3> mM(mP.template topLeftCorner<3,3>());
+	TYPE1 M[9];
+	InvertMatrix3x3(mM.data(), M);
+	ray[0] = M[0*3+0]*pt[0] + M[0*3+1]*pt[1] + M[0*3+2];
+	ray[1] = M[1*3+0]*pt[0] + M[1*3+1]*pt[1] + M[1*3+2];
+	ray[2] = M[2*3+0]*pt[0] + M[2*3+1]*pt[1] + M[2*3+2];
+} // RayPoint_3x4_2_3
+/*----------------------------------------------------------------*/
+
 // project column vertex - used only for visualization purposes
 // (optimized ProjectVertex for P[3,4] and X[3,1], output pt[3,1])
 template<typename TYPE1, typename TYPE2>
@@ -424,6 +438,32 @@ inline TYPE2 ComputeAngle(const TYPE1* X1, const TYPE1* C1, const TYPE1* X2, con
 	const TYPE1 V2[] = {X2[0]-C2[0], X2[1]-C2[1], X2[2]-C2[2]};
 	return ComputeAngle<TYPE1,TYPE2>(V1, V2);
 } // ComputeAngle
+/*----------------------------------------------------------------*/
+
+// given a triangle defined by three 3D points,
+// compute its normal (plane's normal oriented according to the given points order)
+template<typename TYPE>
+inline TPoint3<TYPE> ComputeTriangleNormal(const TPoint3<TYPE>& v0, const TPoint3<TYPE>& v1, const TPoint3<TYPE>& v2) {
+	return (v1-v0).cross(v2-v0);
+} // ComputeTriangleNormal
+/*----------------------------------------------------------------*/
+
+// compute a shape quality measure of the triangle composed by vertices (v0,v1,v2)
+// returns 2*AreaTri/(MaxEdge^2) in range [0, 0.866]
+// (ex: equilateral sqrt(3)/2, half-square 1/2, up to a line that has zero quality)
+template<typename TYPE>
+inline TYPE ComputeTriangleQuality(const TPoint3<TYPE>& v0, const TPoint3<TYPE>& v1, const TPoint3<TYPE>& v2)
+{
+	const TPoint3<TYPE> d10(v1-v0);
+	const TPoint3<TYPE> d20(v2-v0);
+	const TPoint3<TYPE> d12(v1-v2);
+	const TYPE a((TYPE)norm(d10.cross(d20)));
+	if (a == 0) return 0; // area zero triangles have surely zero quality
+	const TYPE nd10(normSq(d10));
+	if (nd10 == 0) return 0; // area zero triangles have surely zero quality
+	const TYPE b(MAXF3(nd10, normSq(d20), normSq(d12)));
+	return a/b;
+} // ComputeTriangleQuality
 /*----------------------------------------------------------------*/
 
 // given a triangle defined by 3 vertex positions and a point,

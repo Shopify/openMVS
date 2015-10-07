@@ -24,7 +24,10 @@ set(COTIRE_INTDIR "cotire")
 # Define helper functions and macros.
 cmake_policy(SET CMP0011 OLD)
 INCLUDE(build/Utils.cmake)
-INCLUDE(build/Cotire.cmake)
+if(ENABLE_PRECOMPILED_HEADERS)
+	INCLUDE(build/Cotire.cmake)
+endif()
+
 
 # Init session with macros defined in Utils.cmake
 GetOperatingSystemArchitectureBitness(SYSTEM)
@@ -39,6 +42,7 @@ SET(OpenMVS_USE_FAST_INVSQRT OFF CACHE BOOL "Use an optimized code to compute th
 SET(OpenMVS_USE_FAST_CBRT ON CACHE BOOL "Use an optimized code to compute the cubic root")
 SET(OpenMVS_USE_SSE ON CACHE BOOL "Enable SSE optimizations")
 SET(OpenMVS_USE_OPENMP ON CACHE BOOL "Enable OpenMP library")
+SET(OpenMVS_USE_CUDA ON CACHE BOOL "Enable CUDA library")
 SET(OpenMVS_USE_BREAKPAD ON CACHE BOOL "Enable BreakPad library")
 
 include_directories("${OpenMVS_SOURCE_DIR}")
@@ -51,6 +55,17 @@ if(OpenMVS_USE_OPENMP)
 		add_definitions(-D_USE_OPENMP)
 	else()
 		message("-- Can't find OpenMP. Continuing without it.")
+	endif()
+endif()
+
+if(OpenMVS_USE_CUDA)
+	FIND_PACKAGE(CUDA)
+	if(CUDA_FOUND)
+		include_directories(${CUDA_INCLUDE_DIRS})
+		add_definitions(-D_USE_CUDA)
+	else()
+		set(CUDA_LIBRARIES "")
+		message("-- Can't find CUDA. Continuing without it.")
 	endif()
 endif()
 

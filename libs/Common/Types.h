@@ -57,16 +57,23 @@
 #include <omp.h>
 #endif
 
+// Function delegate functionality
+#ifdef _SUPPORT_CPP11
+#include "FastDelegateCPP11.h"
+#define DELEGATE fastdelegate::delegate
+#define DELEGATEBIND(DLGT, FNC) DLGT::from< FNC >()
+#define DELEGATEBINDCLASS(DLGT, FNC, OBJ) DLGT::from(*OBJ, FNC)
+#else
+#include "FastDelegate.h"
+#include "FastDelegateBind.h"
+#define DELEGATE fastdelegate::FastDelegate
+#define DELEGATEBIND(DLGT, FNC) fastdelegate::bind(FNC)
+#define DELEGATEBINDCLASS(DLGT, FNC, OBJ) fastdelegate::bind(FNC, OBJ)
+#endif
+
 // File-System utils (stlplus)
 #include "FileUtil.h"
 #include "Wildcard.h"
-
-// Function delegate functionality
-#include "FastDelegate.h"
-#include "FastDelegateBind.h"
-// Convenience syntax
-using namespace fastdelegate;
-using fastdelegate::bind;
 
 // include usual boost libraries
 #ifdef _USE_BOOST
@@ -317,6 +324,8 @@ FORCEINLINE T RANDOM() { return (T(1)/RAND_MAX)*RAND(); }
 # define __BIG_ENDIAN 1
 # define __PDP_ENDIAN 2
 # define __BYTE_ORDER __LITTLE_ENDIAN
+#elif defined(__APPLE__)
+# include <machine/endian.h>
 #elif defined(__GNUC__)
 # include <endian.h>
 #endif
@@ -336,6 +345,7 @@ FORCEINLINE T RANDOM() { return (T(1)/RAND_MAX)*RAND(); }
 #include "File.h"
 #include "MemFile.h"
 #include "LinkLib.h"
+#include "HalfFloat.h"
 
 namespace SEACAVE {
 
@@ -388,7 +398,6 @@ typedef class GENERAL_API cList<double, double, 0>      DoubleArr;
 #include "SML.h"
 #include "ConfigTable.h"
 #include "HTMLDoc.h"
-#include "CUDA.h"
 
 
 // D E F I N E S ///////////////////////////////////////////////////
@@ -718,7 +727,7 @@ inline float cbrt5(float f) {
 	#if 1
 	(int&)f = (((int&)f-(127<<23))/3+(127<<23));
 	#else
-	unsigned int* p = (unsigned int *)&f;
+	unsigned* p = (unsigned*)&f;
 	*p = *p/3 + 709921077;
 	#endif
 	return f;
@@ -726,10 +735,10 @@ inline float cbrt5(float f) {
 // cube root approximation using bit hack for 64-bit float
 // adapted from Kahan's cbrt (5 decimals)
 inline double cbrt5(double d) {
-	const unsigned int B1 = 715094163;
+	const unsigned B1 = 715094163;
 	double t = 0.0;
-	unsigned int* pt = (unsigned int*)&t;
-	unsigned int* px = (unsigned int*)&d;
+	unsigned* pt = (unsigned*)&t;
+	unsigned* px = (unsigned*)&d;
 	pt[1]=px[1]/3+B1;
 	return t;
 }
@@ -938,7 +947,7 @@ inline Type cerp(const Type& u0, const Type& u1, const Type& u2, const Type& u3,
 
 // define utile functions to deal with SSE operations
 
-ALIGN(16) struct sse_vec4f {
+struct ALIGN(16) sse_vec4f {
 	union {
 		float v[4];
 		struct {
@@ -955,7 +964,7 @@ ALIGN(16) struct sse_vec4f {
 	inline operator float*() {return v;}
 };
 
-ALIGN(16) struct sse_vec2d {
+struct ALIGN(16) sse_vec2d {
 	union {
 		double v[2];
 		struct {
@@ -1332,6 +1341,7 @@ template <typename TYPE> const TPoint2<TYPE> TPoint2<TYPE>::ZERO(0,0);
 template <typename TYPE> const TPoint2<TYPE> TPoint2<TYPE>::INF(std::numeric_limits<TYPE>::infinity(),std::numeric_limits<TYPE>::infinity());
 /*----------------------------------------------------------------*/
 typedef TPoint2<int> Point2i;
+typedef TPoint2<hfloat> Point2hf;
 typedef TPoint2<float> Point2f;
 typedef TPoint2<double> Point2d;
 /*----------------------------------------------------------------*/
@@ -1424,6 +1434,7 @@ template <typename TYPE> const TPoint3<TYPE> TPoint3<TYPE>::ZERO(0,0,0);
 template <typename TYPE> const TPoint3<TYPE> TPoint3<TYPE>::INF(std::numeric_limits<TYPE>::infinity(),std::numeric_limits<TYPE>::infinity(),std::numeric_limits<TYPE>::infinity());
 /*----------------------------------------------------------------*/
 typedef TPoint3<int> Point3i;
+typedef TPoint3<hfloat> Point3hf;
 typedef TPoint3<float> Point3f;
 typedef TPoint3<double> Point3d;
 /*----------------------------------------------------------------*/
@@ -1440,6 +1451,7 @@ public:
 	#ifdef _USE_EIGEN
 	EIGEN_MAKE_ALIGNED_OPERATOR_NEW_IF_VECTORIZABLE_FIXED_SIZE(TYPE,m*n)
 	typedef Eigen::Matrix<TYPE,m,n,(n>1?Eigen::RowMajor:Eigen::Default)> EMat;
+	typedef Eigen::Map<const EMat> CEMatMap;
 	typedef Eigen::Map<EMat> EMatMap;
 	#endif
 
@@ -1483,8 +1495,8 @@ public:
 	inline operator const EMat& () const { return *((const EMat*)this); }
 	inline operator EMat& () { return *((EMat*)this); }
 	// Access point as Eigen::Map equivalent
-	inline operator const EMatMap () const { return EMatMap((TYPE*)this); }
-	inline operator EMatMap () { return EMatMap((TYPE*)this); }
+	inline operator CEMatMap() const { return CEMatMap((const TYPE*)val); }
+	inline operator EMatMap () { return EMatMap((TYPE*)val); }
 	#endif
 
 	// calculate right/left null-vector of matrix A ([n,1])
@@ -1535,13 +1547,13 @@ public:
 	inline TDMatrix(const Size& sz, const TYPE& v) : Base(sz, v) {}
 	inline TDMatrix(const Size& sz, TYPE* _data, size_t _step=Base::AUTO_STEP) : Base(sz.height, sz.width, _data, _step) {}
 	#ifdef _USE_EIGEN
-	inline TDMatrix(const EMat& rhs) { operator EMat& () = rhs; }
+	inline TDMatrix(const EMat& rhs) { operator EMatMap () = rhs; }
 	#endif
 
 	inline TDMatrix& operator = (const Base& rhs) { Base::operator=(rhs); return *this; }
 	inline TDMatrix& operator = (const cv::MatExpr& rhs) { Base::operator=(rhs); return *this; }
 	#ifdef _USE_EIGEN
-	inline TDMatrix& operator = (const EMat& rhs) { operator EMat& () = rhs; return *this; }
+	inline TDMatrix& operator = (const EMat& rhs) { operator EMatMap () = rhs; return *this; }
 	#endif
 
 	/// Construct the 2D matrix with the desired size and init its elements
@@ -1598,7 +1610,7 @@ public:
 		ASSERT(rows == 1 || cols == 1);
 		const int last = area()-1;
 		Base::operator()(idx) = Base::operator()(last);
-		resize((size_t)last);
+		Base::resize((size_t)last);
 	}
 
 	/** @author koeser
@@ -1666,8 +1678,8 @@ public:
 
 	#ifdef _USE_EIGEN
 	// Access point as Eigen::Map equivalent
-	inline operator const EMatMap () const { ASSERT(cv::Mat::isContinuous()); return EMatMap((TYPE*)data, rows, cols); }
-	inline operator EMatMap () { ASSERT(cv::Mat::isContinuous()); return EMatMap((TYPE*)data, rows, cols); }
+	inline operator const EMatMap () const { return EMatMap(getData(), rows, cols); }
+	inline operator EMatMap () { return EMatMap(getData(), rows, cols); }
 	#endif
 
 	#ifdef _USE_BOOST
@@ -2098,6 +2110,7 @@ public:
 };
 /*----------------------------------------------------------------*/
 typedef TImage<uint8_t> Image8U;
+typedef TImage<hfloat> Image16F;
 typedef TImage<float> Image32F;
 typedef TImage<double> Image64F;
 typedef TImage<Pixel8U> Image8U3;
@@ -2236,8 +2249,8 @@ protected:
 	template<class Archive>
 	void save(Archive& ar, const unsigned int /*version*/) const {
 		if (empty()) {
-			const int size(0);
-			ar & size;
+			const int sz(0);
+			ar & sz;
 			return;
 		}
 		ar & cols;
@@ -2430,67 +2443,6 @@ template<typename TYPE, int m, int n> inline String cvMat2String(const TMatrix<T
 template<typename TYPE> inline String cvMat2String(const TPoint3<TYPE>& pt, LPCSTR format="% 10.4f ") { return cvMat2String(cv::Mat(pt), format); }
 /*----------------------------------------------------------------*/
 
-
-// Wavelets
-template <typename TYPE, int TABLE_LEN>
-class TWavelets
-{
-public:
-	typedef TYPE Type;
-
-	enum WaveletsType {
-		WT_SEPARABLE = 0,
-		WT_REDBLACK,
-	};
-
-	enum DistanceType {
-		DT_EXP = 0,
-		DT_INV,
-	};
-
-	TWavelets(DistanceType distType, TYPE sigma, TYPE eps=TYPE(0.0001));
-	~TWavelets() {}
-
-	template <class WAVELET_TYPE, typename PIXEL_TYPE>
-	static void ForwardTransform(const TImage<PIXEL_TYPE>& image, TDMatrix< TImage<typename WAVELET_TYPE::Type> >& A, TDMatrix< TImage<typename WAVELET_TYPE::Type> >& W, WAVELET_TYPE& wavelet, size_t nlevels);
-	template <class WAVELET_TYPE, typename PIXEL_TYPE>
-	static void BackwardTransform(const TDMatrix< TImage<typename WAVELET_TYPE::Type> >& A, const TDMatrix< TImage<typename WAVELET_TYPE::Type> >& W, TImage<PIXEL_TYPE>& image, WAVELET_TYPE& wavelet);
-
-protected:
-	inline TYPE dist(TYPE v) const;
-
-private:
-	TYPE dist_table[TABLE_LEN];
-};
-template <typename TYPE, int TABLE_LEN=1024>
-class TSeparableWavelets : public TWavelets<TYPE,TABLE_LEN>
-{
-public:
-	typedef TWavelets<TYPE,TABLE_LEN> Base;
-
-	TSeparableWavelets(typename Base::DistanceType distType, TYPE sigma) : Base(distType, sigma) {}
-	~TSeparableWavelets() {}
-
-	void Decompose(const TImage<TYPE>&, TImage<TYPE>&, TImage<TYPE>&) const;
-	void Compose(const TImage<TYPE>&, const TImage<TYPE>&, TImage<TYPE>&) const;
-};
-template <typename TYPE, int TABLE_LEN=1024>
-class TRedBlackWavelets : public TWavelets<TYPE,TABLE_LEN>
-{
-public:
-	typedef TWavelets<TYPE,TABLE_LEN> Base;
-
-	TRedBlackWavelets(typename Base::DistanceType distType, TYPE sigma) : Base(distType, sigma) {}
-	~TRedBlackWavelets() {}
-
-	void Decompose(const TImage<TYPE>&, TImage<TYPE>&, TImage<TYPE>&) const;
-	void Compose(const TImage<TYPE>&, const TImage<TYPE>&, TImage<TYPE>&) const;
-};
-/*----------------------------------------------------------------*/
-typedef TSeparableWavelets<REAL> SeparableWavelets;
-typedef TRedBlackWavelets<REAL> RedBlackWavelets;
-/*----------------------------------------------------------------*/
-
 } // namespace SEACAVE
 
 
@@ -2512,7 +2464,8 @@ template <typename Precision>
 class SO3
 {
 public:
-	friend std::istream& operator>>(std::istream& is, SO3& rhs);
+	template <typename P>
+	friend std::istream& operator>>(std::istream& is, SO3<P>& rhs);
 
 	typedef Matrix<Precision,3,3,Eigen::RowMajor> Mat3;
 	typedef Matrix<Precision,3,1> Vec3;
@@ -2634,7 +2587,8 @@ template<typename Precision>
 class SO2
 {
 public:
-	friend std::istream& operator>>(std::istream&, SO2&);
+	template <typename P>
+	friend std::istream& operator>>(std::istream&, SO2<P>&);
 
 	typedef Matrix<Precision,2,2,Eigen::RowMajor> Mat2;
 
@@ -2704,5 +2658,6 @@ private:
 #include "Ray.h"
 #include "Octree.h"
 #include "Util.inl"
+#include "CUDA.h"
 
 #endif // __SEACAVE_TYPES_H__

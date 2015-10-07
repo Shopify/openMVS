@@ -111,7 +111,7 @@ void DepthData::GetNormal(const ImageRef& ir, Point3f& N, const TImage<Point3f>*
 	const Camera& camera = images.First().camera;
 	if (!normalMap.empty()) {
 		// set available normal
-		N = camera.R.t()*CastReal(normalMap(ir));
+		N = camera.R.t()*Cast<REAL>(normalMap(ir));
 		return;
 	}
 	// estimate normal based on the neighbor depths
@@ -266,7 +266,7 @@ DepthEstimator::DepthEstimator(DepthData& _depthData0, volatile Thread::safe_t& 
 	image0Sum(_image0Sum), coords(_coords), size(_depthData0.images.First().image.size()),
 	idxScore((_depthData0.images.GetSize()-1)/3), dir(_dir),
 	dMin(_depthData0.dMin), dMax(_depthData0.dMax),
-	neighbors(0,2), neighborsData(0,4),
+	neighborsData(0,4), neighbors(0,2),
 	smoothBonusDepth(OPTDENSE::fRandomSmoothBonus), smoothBonusNormal(OPTDENSE::fRandomSmoothBonus*0.98f),
 	smoothSigmaDepth(-1.f/(2.f*SQUARE(OPTDENSE::fRandomSmoothDepth))), // used in exp(-x^2 / (2*(0.005^2)))
 	smoothSigmaNormal(-1.f/(2.f*SQUARE(FD2R(OPTDENSE::fRandomSmoothNormal)))), // used in exp(-x^2 / (2*(0.15^2)))
@@ -650,7 +650,7 @@ void MVS::EstimatePointColors(const ImageArr& images, PointCloud& pointcloud)
 			color = Pixel8U::WHITE;
 		} else {
 			// get image color
-			const Point2f proj(CastFloat(pImageData->camera.ProjectPointP(point)));
+			const Point2f proj(pImageData->camera.ProjectPointP(point));
 			color = (pImageData->image.isInside(proj) ? pImageData->image.sample(proj) : Pixel8U::WHITE);
 		}
 	}
@@ -690,7 +690,7 @@ void MVS::EstimatePointNormals(const ImageArr& images, PointCloud& pointcloud, i
 		// correct normal orientation
 		ASSERT(!views.IsEmpty());
 		const Image& imageData = images[views.First()];
-		if (normal.dot(CastFloat(imageData.camera.C)-point) < 0)
+		if (normal.dot(Cast<float>(imageData.camera.C)-point) < 0)
 			normal = -normal;
 	}
 
@@ -925,7 +925,7 @@ bool MVS::ExportPointCloud(const String& fileName, const Image& imageData, const
 					continue;
 				const Point3f X(P0.TransformPointI2W(Point3(i,j,depth)));
 				vertex.x = X.x; vertex.y = X.y; vertex.z = X.z;
-				const Point3f N(P0.R.t() * CastReal(normalMap(j,i)));
+				const Point3f N(P0.R.t() * Cast<REAL>(normalMap(j,i)));
 				vertex.nx = N.x; vertex.ny = N.y; vertex.nz = N.z;
 				const Pixel8U c(imageData.image.empty() ? Pixel8U::WHITE : imageData.image(j, i));
 				vertex.r = c.r; vertex.g = c.g; vertex.b = c.b;

@@ -316,7 +316,7 @@ bool Scene::Save(const String& fileName, ARCHIVE_TYPE type) const
 
 inline float Footprint(const Camera& camera, const Point3f& X) {
 	const REAL fSphereRadius(1);
-	const Point3 cX(camera.TransformPointW2C(CastReal(X)));
+	const Point3 cX(camera.TransformPointW2C(Cast<REAL>(X)));
 	return (float)norm(camera.TransformPointC2I(Point3(cX.x+fSphereRadius,cX.y,cX.z))-camera.TransformPointC2I(cX))+std::numeric_limits<float>::epsilon();
 }
 
@@ -356,14 +356,14 @@ bool Scene::SelectNeighborViews(uint32_t ID, IndexArr& points, unsigned nMinView
 		imageData.avgDepth += (float)imageData.camera.PointDepth(point);
 		++nPoints;
 		// score shared views
-		const Point3f V1(imageData.camera.C - CastReal(point));
+		const Point3f V1(imageData.camera.C - Cast<REAL>(point));
 		const float footprint1(Footprint(imageData.camera, point));
 		FOREACHPTR(pView, views) {
 			const PointCloud::View& view = *pView;
 			if (view == ID)
 				continue;
 			const Image& imageData2 = images[view];
-			const Point3f V2(imageData2.camera.C - CastReal(point));
+			const Point3f V2(imageData2.camera.C - Cast<REAL>(point));
 			const float footprint2(Footprint(imageData2.camera, point));
 			const float fAngle(ACOS(ComputeAngle<float,float>(V1.ptr(), V2.ptr())));
 			const float fScaleRatio(footprint1/footprint2);
@@ -432,12 +432,12 @@ bool Scene::SelectNeighborViews(uint32_t ID, IndexArr& points, unsigned nMinView
 	if (VERBOSITY_LEVEL > 2) {
 		String msg;
 		FOREACH(n, neighbors)
-			msg += String::FormatString(" % 3u(%upts,%.2fscl)", neighbors[n].idx.ID, neighbors[n].idx.points, neighbors[n].idx.scale);
-		VERBOSE("Reference image % 3u sees %u views:%s (%u shared points)", ID, neighbors.GetSize(), msg.c_str(), nPoints);
+			msg += String::FormatString(" %3u(%upts,%.2fscl)", neighbors[n].idx.ID, neighbors[n].idx.points, neighbors[n].idx.scale);
+		VERBOSE("Reference image %3u sees %u views:%s (%u shared points)", ID, neighbors.GetSize(), msg.c_str(), nPoints);
 	}
 	#endif
 	if (points.GetSize() <= 3 || neighbors.GetSize() < MINF(nMinViews,nCalibratedImages-1)) {
-		DEBUG_EXTRA("error: reference image % 3u has not enough images in view", ID);
+		DEBUG_EXTRA("error: reference image %3u has not enough images in view", ID);
 		return false;
 	}
 	return true;

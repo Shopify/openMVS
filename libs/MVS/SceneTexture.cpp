@@ -299,7 +299,7 @@ struct MeshTexture {
 		const Image8U3& image;
 		const Sampler sampler;
 
-		inline SampleImage(const Image8U3& _image) : image(_image) {}
+		inline SampleImage(const Image8U3& _image) : image(_image), sampler() {}
 		// sample the edge with linear weights
 		void AddEdge(const TexCoord& p0, const TexCoord& p1) {
 			const TexCoord p01(p1 - p0);
@@ -365,7 +365,8 @@ struct MeshTexture {
 
 		inline RasterPatchMeanEdgeData(Image32F3& _image, Image8U& _mask, const Image32F3& _image0, const Image8U3& _image1,
 									   const TexCoord& _p0, const TexCoord& _p0Adj, const TexCoord& _p1, const TexCoord& _p1Adj)
-			: image(_image), mask(_mask), image0(_image0), image1(_image1), p0(_p0), p0Dir(_p0Adj-_p0), p1(_p1), p1Dir(_p1Adj-_p1), length((float)norm(p0Dir)) {}
+			: image(_image), mask(_mask), image0(_image0), image1(_image1),
+			p0(_p0), p0Dir(_p0Adj-_p0), p1(_p1), p1Dir(_p1Adj-_p1), length((float)norm(p0Dir)), sampler() {}
 		inline void operator()(const ImageRef& pt) {
 			const float l((float)norm(TexCoord(pt)-p0)/length);
 			// compute mean color
@@ -460,12 +461,12 @@ MeshTexture::MeshTexture(Scene& _scene, unsigned _nResolutionLevel, unsigned _nM
 	:
 	nResolutionLevel(_nResolutionLevel),
 	nMinResolution(_nMinResolution),
-	vertices(_scene.mesh.vertices),
-	faces(_scene.mesh.faces),
 	vertexFaces(_scene.mesh.vertexFaces),
 	vertexBoundary(_scene.mesh.vertexBoundary),
 	faceTexcoords(_scene.mesh.faceTexcoords),
 	textureDiffuse(_scene.mesh.textureDiffuse),
+	vertices(_scene.mesh.vertices),
+	faces(_scene.mesh.faces),
 	images(_scene.images),
 	scene(_scene)
 {
@@ -572,7 +573,7 @@ void MeshTexture::ListCameraFaces(FaceDataViewArr& facesDatas, float fOutlierThr
 	};
 	typedef TOctree<Mesh::VertexArr,float,3> Octree;
 	const Octree octree(vertices);
-	#if 1 && !defined(_RELEASE)
+	#if 0 && !defined(_RELEASE)
 	Octree::DEBUGINFO_TYPE info;
 	octree.GetDebugInfo(&info);
 	Octree::LogDebugInfo(info);
@@ -591,7 +592,7 @@ void MeshTexture::ListCameraFaces(FaceDataViewArr& facesDatas, float fOutlierThr
 		// select faces inside view frustum
 		typedef TFrustum<float,5> Frustum;
 		FacesInserter inserter(vertexFaces, cameraFaces);
-		const Frustum frustum(Frustum::MATRIX3x4(((const PMatrix::EMatMap)imageData.camera.P).cast<float>()), (float)imageData.width, (float)imageData.height);
+		const Frustum frustum(Frustum::MATRIX3x4(((PMatrix::CEMatMap)imageData.camera.P).cast<float>()), (float)imageData.width, (float)imageData.height);
 		octree.Traverse(frustum, inserter);
 		// project all triangles in this view and keep the closest ones
 		const Camera& camera = imageData.camera;
@@ -604,7 +605,7 @@ void MeshTexture::ListCameraFaces(FaceDataViewArr& facesDatas, float fOutlierThr
 			const Face& facet = faces[idxFace];
 			for (unsigned v=0; v<3; ++v) {
 				const Vertex& pt = vertices[facet[v]];
-				ptc[v] = camera.TransformPointW2C(CastReal(pt));
+				ptc[v] = camera.TransformPointW2C(Cast<REAL>(pt));
 				pti[v] = camera.TransformPointC2I(ptc[v]);
 				// skip face if not completely inside
 				if (!depthMap.isInsideWithBorder<float,3>(pti[v]))
@@ -798,7 +799,7 @@ bool MeshTexture::FaceOutlierDetection(FaceDataArr& faceDatas, float thOutlier) 
 	Eigen::Vector3d mean;
 	Eigen::Matrix3d covariance;
 	Eigen::Matrix3d covarianceInv;
-	for (int iter = 0; iter < maxIterations; ++iter) {
+	for (unsigned iter = 0; iter < maxIterations; ++iter) {
 		// compute the mean color and color covariance only for inliers
 		const Eigen::Block<Eigen::Matrix3Xd,3,Eigen::Dynamic,!Eigen::Matrix3Xd::IsRowMajor> colors(colorsAll.leftCols(numInliers));
 		mean = colors.rowwise().mean();
@@ -1027,7 +1028,7 @@ void MeshTexture::FaceViewSelection(float fOutlierThreshold)
 				if (inference.GetNumNodes() == 0)
 					continue;
 				const Label label(inference.GetLabel(nodeIDs[l]));
-				ASSERT(label >= 0 && label < images.GetSize()+1);
+				ASSERT(label < images.GetSize()+1);
 				if (label > 0)
 					labels[l] = label-1;
 			}
@@ -1434,8 +1435,8 @@ void MeshTexture::GlobalSeamLeveling()
 				Pixel8U& v = image.at<Pixel8U>(r,c);
 				const Color col(RGB2YCBCR(Color(v)));
 				const Color acol(YCBCR2RGB(Color(col+a)));
-				for (int i=0; i<3; ++i)
-					v[i] = (uint8_t)CLAMP(ROUND2INT(acol[i]), 0, 255);
+				for (int p=0; p<3; ++p)
+					v[p] = (uint8_t)CLAMP(ROUND2INT(acol[p]), 0, 255);
 			}
 		}
 	}
@@ -1579,7 +1580,7 @@ void MeshTexture::ProcessMask(Image8U& mask, int stripWidth)
 	Image8U orgMask;
 	mask.copyTo(orgMask);
 	typedef std::vector<ImageRef> PixelVector;
-	for (int i=0; i<stripWidth; ++i) {
+	for (int s=0; s<stripWidth; ++s) {
 		PixelVector emptyPixels(borderPixels.begin(), borderPixels.end());
 		borderPixels.clear();
 		// mark the new empty pixels as empty in the mask
@@ -1660,7 +1661,6 @@ void MeshTexture::PoissonBlending(const Image32F3& src, Image32F3& dst, const Im
 
 	const int n(dst.area());
 	const int width(dst.width());
-	const int height(dst.height());
 
 	TImage<MatIdx> indices(dst.size());
 	indices.memset(0xff);
@@ -1746,13 +1746,14 @@ void MeshTexture::LocalSeamLeveling()
 		image.copyTo(imageOrg);
 		// render patch coverage
 		Image8U mask(texturePatch.rect.size());
-		mask.memset(0);
-		RasterPatchCoverageData data(mask);
-		FOREACHPTR(pIdxFace, texturePatch.faces) {
-			const FIndex idxFace(*pIdxFace);
-			const Face& face = faces[idxFace];
-			data.tri = faceTexcoords.Begin()+idxFace*3;
-			ColorMap::RasterizeTriangle(data.tri[0], data.tri[1], data.tri[2], data);
+		{
+			mask.memset(0);
+			RasterPatchCoverageData data(mask);
+			FOREACHPTR(pIdxFace, texturePatch.faces) {
+				const FIndex idxFace(*pIdxFace);
+				data.tri = faceTexcoords.Begin()+idxFace*3;
+				ColorMap::RasterizeTriangle(data.tri[0], data.tri[1], data.tri[2], data);
+			}
 		}
 		// render the patch border meeting neighbor patches
 		const TexCoord offset(texturePatch.rect.tl());
@@ -1812,8 +1813,8 @@ void MeshTexture::LocalSeamLeveling()
 			FOREACHPTR(pPatch, seamVertex.patches) {
 				const SeamVertex::Patch& patch = *pPatch;
 				// add its view to the vertex mean color
-				const Image8U3& image(images[texturePatches[patch.idxPatch].label].image);
-				accumColor.Add(image.sample<Sampler,Color>(sampler, patch.proj)/255.f, 1.f);
+				const Image8U3& img(images[texturePatches[patch.idxPatch].label].image);
+				accumColor.Add(img.sample<Sampler,Color>(sampler, patch.proj)/255.f, 1.f);
 			}
 			const SeamVertex::Patch& thisPatch = seamVertex.patches[idxVertPatch];
 			const ImageRef pt(ROUND2INT(thisPatch.proj-offset));
@@ -1833,8 +1834,8 @@ void MeshTexture::LocalSeamLeveling()
 					continue;
 				const Color& a = image(r,c);
 				Pixel8U& v = imagePatch.at<Pixel8U>(r,c);
-				for (int i=0; i<3; ++i)
-					v[i] = (uint8_t)CLAMP(ROUND2INT(a[i]*255.f), 0, 255);
+				for (int p=0; p<3; ++p)
+					v[p] = (uint8_t)CLAMP(ROUND2INT(a[p]*255.f), 0, 255);
 			}
 		}
 	}
@@ -1848,8 +1849,8 @@ void MeshTexture::GenerateTexture(bool bGlobalSeamLeveling, bool bLocalSeamLevel
 	#ifdef TEXOPT_USE_OPENMP
 	const unsigned numPatches(texturePatches.GetSize()-1);
 	#pragma omp parallel for schedule(dynamic)
-	for (int_t i=0; i<(int_t)numPatches; ++i) {
-		TexturePatch& texturePatch = texturePatches[(uint32_t)i];
+	for (int_t idx=0; idx<(int_t)numPatches; ++idx) {
+		TexturePatch& texturePatch = texturePatches[(uint32_t)idx];
 	#else
 	for (TexturePatch *pTexturePatch=texturePatches.Begin(), *pTexturePatchEnd=texturePatches.End()-1; pTexturePatch<pTexturePatchEnd; ++pTexturePatch) {
 		TexturePatch& texturePatch = *pTexturePatch;

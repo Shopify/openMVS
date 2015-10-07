@@ -66,6 +66,7 @@ public:
 
 	typedef cList<VIndex,VIndex,0,8,VIndex> VertexIdxArr;
 	typedef cList<FIndex,FIndex,0,8,FIndex> FaceIdxArr;
+	typedef cList<VertexIdxArr> VertexVerticesArr;
 	typedef cList<FaceIdxArr> VertexFacesArr;
 
 	typedef TPoint3<float> Normal;
@@ -88,6 +89,7 @@ public:
 	FaceArr faces;
 
 	NormalArr vertexNormals; // for each vertex, the normal to the surface in that point (optional)
+	VertexVerticesArr vertexVertices; // for each vertex, the list of adjacent vertices (optional)
 	VertexFacesArr vertexFaces; // for each vertex, the list of faces containing it (optional)
 	BoolArr vertexBoundary; // for each vertex, stores if it is at the boundary or not (optional)
 
@@ -112,6 +114,7 @@ public:
 	void EmptyExtra();
 	inline bool IsEmpty() const { return vertices.IsEmpty(); }
 
+	void ListIncidenteVertices();
 	void ListIncidenteFaces();
 	void ListBoundaryVertices();
 	void ComputeNormalFaces();
@@ -121,11 +124,31 @@ public:
 	void GetFaceFaces(FIndex, FaceIdxArr&) const;
 	void GetEdgeVertices(FIndex, FIndex, uint32_t vs0[2], uint32_t vs1[2]) const;
 	void GetAdjVertices(VIndex, VertexIdxArr&) const;
+	void GetAdjVertexFaces(VIndex, VIndex, FaceIdxArr&) const;
 
 	bool FixNonManifold();
-	void Clean(float fDecimate=0.7f, float fSpurious=10.f, bool bRemoveSpikes=true, unsigned nCloseHoles=30, unsigned nSmoothMesh=2);
+	void Clean(float fDecimate=0.7f, float fSpurious=10.f, bool bRemoveSpikes=true, unsigned nCloseHoles=30, unsigned nSmoothMesh=2, bool bLastClean=true);
 
 	void EnsureEdgeSize(float minEdge=-0.5f, float maxEdge=-4.f, float collapseRatio=0.2, float degenerate_angle_deg=150, int mode=1, int max_iters=50);
+
+	typedef cList<uint16_t,uint16_t,0,16,FIndex> AreaArr;
+	void Subdivide(const AreaArr& maxAreas, uint32_t maxArea);
+	void Decimate(VertexIdxArr& verticesRemove);
+	void CloseHole(VertexIdxArr& vertsLoop);
+	void CloseHoleQuality(VertexIdxArr& vertsLoop);
+	void RemoveFaces(FaceIdxArr& facesRemove, bool bUpdateLists=false);
+	void RemoveVertices(VertexIdxArr& vertexRemove, bool bUpdateLists=false);
+
+	inline Normal FaceNormal(const Face& f) const { return ComputeTriangleNormal(vertices[f[0]], vertices[f[1]], vertices[f[2]]); }
+	inline Normal VertexNormal(VIndex idxV) const {
+		ASSERT(vertices.GetSize() == vertexFaces.GetSize());
+		const FaceIdxArr& vf = vertexFaces[idxV];
+		ASSERT(!vf.IsEmpty());
+		Normal n(Normal::ZERO); int c(0);
+		FOREACHPTR(pIdxF, vf)
+			n += normalized(FaceNormal(faces[*pIdxF]));
+		return n/(float)c;
+	}
 
 	// file IO
 	bool Load(const String& fileName);
@@ -147,6 +170,7 @@ public:
 		ar & vertices;
 		ar & faces;
 		ar & vertexNormals;
+		ar & vertexVertices;
 		ar & vertexFaces;
 		ar & vertexBoundary;
 		ar & faceNormals;
