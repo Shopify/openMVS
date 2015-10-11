@@ -1,16 +1,12 @@
 /*
  * ReconstructMesh.cpp
  *
- * Copyright (c) 2014-2015 FOXEL SA - http://foxel.ch
- * Please read <http://foxel.ch/license> for more information.
- *
+ * Copyright (c) 2014-2015 SEACAVE
  *
  * Author(s):
  *
  *      cDc <cdc.seacave@gmail.com>
  *
- *
- * This file is part of the FOXEL project <http://foxel.ch>.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Affero General Public License as published by
@@ -31,9 +27,6 @@
  *      You are required to preserve legal notices and author attributions in
  *      that material or in the Appropriate Legal Notices displayed by works
  *      containing it.
- *
- *      You are required to attribute the work as explained in the "Usage and
- *      Attribution" section of <http://foxel.ch/license>.
  */
 
 #include "../../libs/MVS/Common.h"
@@ -214,7 +207,7 @@ int main(int argc, LPCTSTR* argv)
 		if (!scene.Load(MAKE_PATH_SAFE(OPT::strInputFileName)) || scene.mesh.IsEmpty())
 			return EXIT_FAILURE;
 		// save mesh
-		scene.mesh.Save(MAKE_PATH_SAFE(Util::getFullFileName(OPT::strOutputFileName) + _T(".ply")));
+		scene.mesh.Save(MAKE_PATH_SAFE(OPT::strOutputFileName));
 	} else {
 		if (OPT::strMeshFileName.IsEmpty()) {
 			// load point-cloud and reconstruct a coarse mesh

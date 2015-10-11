@@ -113,22 +113,12 @@ public:
 		return m_pointer;
 	}
 
-	inline bool operator==(const CAutoPtr& _Right) const
-	{	// return pointer to class object
-		return (m_pointer == _Right.m_pointer);
-	}
-
-	inline bool operator!=(const CAutoPtr& _Right) const
-	{	// return pointer to class object
-		return (m_pointer != _Right.m_pointer);
-	}
-
-	inline bool operator==(const void* _Right) const
+	inline bool operator==(const TypePtr _Right) const
 	{	// return pointer to class object
 		return (m_pointer == _Right);
 	}
 
-	inline bool operator!=(const void* _Right) const
+	inline bool operator!=(const TypePtr _Right) const
 	{	// return pointer to class object
 		return (m_pointer != _Right);
 	}
@@ -144,11 +134,10 @@ public:
 		m_pointer = _Ptr;
 	}
 
-private:
+protected:
 	TypePtr	m_pointer;		// the wrapped object pointer
 
-#ifdef _USE_BOOST
-protected:
+	#ifdef _USE_BOOST
 	// implement BOOST serialization
 	friend class boost::serialization::access;
 	template<class Archive>
@@ -164,7 +153,7 @@ protected:
 		operator=(newPointer);
 	}
 	BOOST_SERIALIZATION_SPLIT_MEMBER()
-#endif
+	#endif
 };
 
 
@@ -237,22 +226,12 @@ public:
 		return m_pointer;
 	}
 
-	inline bool operator==(const CAutoPtrArr& _Right) const
-	{	// return pointer to class object
-		return (m_pointer == _Right.m_pointer);
-	}
-
-	inline bool operator!=(const CAutoPtrArr& _Right) const
-	{	// return pointer to class object
-		return (m_pointer != _Right.m_pointer);
-	}
-
-	inline bool operator==(const void* _Right) const
+	inline bool operator==(const TypePtr _Right) const
 	{	// return pointer to class object
 		return (m_pointer == _Right);
 	}
 
-	inline bool operator!=(const void* _Right) const
+	inline bool operator!=(const TypePtr _Right) const
 	{	// return pointer to class object
 		return (m_pointer != _Right);
 	}
@@ -268,11 +247,10 @@ public:
 		m_pointer = _Ptr;
 	}
 
-private:
+protected:
 	TypePtr	m_pointer;		// the wrapped object pointer
 
-#ifdef _USE_BOOST
-protected:
+	#ifdef _USE_BOOST
 	// implement BOOST serialization
 	friend class boost::serialization::access;
 	template<class Archive>
@@ -288,7 +266,7 @@ protected:
 		operator=(newPointer);
 	}
 	BOOST_SERIALIZATION_SPLIT_MEMBER()
-#endif
+	#endif
 };
 /*----------------------------------------------------------------*/
 

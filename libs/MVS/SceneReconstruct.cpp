@@ -1,16 +1,12 @@
 /*
 * SceneReconstruct.cpp
 *
-* Copyright (c) 2014-2015 FOXEL SA - http://foxel.ch
-* Please read <http://foxel.ch/license> for more information.
-*
+* Copyright (c) 2014-2015 SEACAVE
 *
 * Author(s):
 *
 *      cDc <cdc.seacave@gmail.com>
 *
-*
-* This file is part of the FOXEL project <http://foxel.ch>.
 *
 * This program is free software: you can redistribute it and/or modify
 * it under the terms of the GNU Affero General Public License as published by
@@ -31,9 +27,6 @@
 *      You are required to preserve legal notices and author attributions in
 *      that material or in the Appropriate Legal Notices displayed by works
 *      containing it.
-*
-*      You are required to attribute the work as explained in the "Usage and
-*      Attribution" section of <http://foxel.ch/license>.
 */
 
 #include "Common.h"
@@ -104,7 +97,7 @@ public:
 		return graph.isNodeOnSrcSide((int)n);
 	}
 
-private:
+protected:
 	graph_type graph;
 };
 #else
@@ -187,7 +180,7 @@ public:
 		return (color[n] != boost::white_color);
 	}
 
-private:
+protected:
 	graph_type graph;
 	std::vector<boost::default_color_type> color;
 	const node_type S;

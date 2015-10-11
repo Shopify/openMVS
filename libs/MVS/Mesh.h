@@ -1,16 +1,12 @@
 /*
 * Mesh.h
 *
-* Copyright (c) 2014-2015 FOXEL SA - http://foxel.ch
-* Please read <http://foxel.ch/license> for more information.
-*
+* Copyright (c) 2014-2015 SEACAVE
 *
 * Author(s):
 *
 *      cDc <cdc.seacave@gmail.com>
 *
-*
-* This file is part of the FOXEL project <http://foxel.ch>.
 *
 * This program is free software: you can redistribute it and/or modify
 * it under the terms of the GNU Affero General Public License as published by
@@ -31,9 +27,6 @@
 *      You are required to preserve legal notices and author attributions in
 *      that material or in the Appropriate Legal Notices displayed by works
 *      containing it.
-*
-*      You are required to attribute the work as explained in the "Usage and
-*      Attribution" section of <http://foxel.ch/license>.
 */
 
 #ifndef _MVS_MESH_H_
@@ -144,10 +137,10 @@ public:
 		ASSERT(vertices.GetSize() == vertexFaces.GetSize());
 		const FaceIdxArr& vf = vertexFaces[idxV];
 		ASSERT(!vf.IsEmpty());
-		Normal n(Normal::ZERO); int c(0);
+		Normal n(Normal::ZERO);
 		FOREACHPTR(pIdxF, vf)
 			n += normalized(FaceNormal(faces[*pIdxF]));
-		return n/(float)c;
+		return n;
 	}
 
 	// file IO
@@ -159,12 +152,20 @@ public:
 	static inline VIndex GetVertex(const Face& f, VIndex v) { const uint32_t idx(FindVertex(f, v)); ASSERT(idx != NO_ID); return f[idx]; }
 	static inline VIndex& GetVertex(Face& f, VIndex v) { const uint32_t idx(FindVertex(f, v)); ASSERT(idx != NO_ID); return f[idx]; }
 
+protected:
+	bool LoadPLY(const String& fileName);
+	bool LoadOBJ(const String& fileName);
+
+	bool SavePLY(const String& fileName, const cList<String>& comments=cList<String>(), bool bBinary=true) const;
+	bool SaveOBJ(const String& fileName) const;
+
 	#ifdef _USE_CUDA
 	static bool InitKernels(int device=-1);
 	#endif
 
 	#ifdef _USE_BOOST
 	// implement BOOST serialization
+	friend class boost::serialization::access;
 	template <class Archive>
 	void serialize(Archive& ar, const unsigned int /*version*/) {
 		ar & vertices;

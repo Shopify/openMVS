@@ -45,17 +45,33 @@ using namespace MVS;
 // (should be enough, as the numerical error does not depend on the depth)
 #define MESHOPT_DEPTHCONSTBIAS 0.05f
 
+// uncomment to use enable memory pool
+// (should reduce the allocation times for frequent used images)
+#define MESHOPT_TYPEPOOL
+
+#ifdef MESHOPT_TYPEPOOL
+#define DEC_BitMatrix(var)		BitMatrix& var = *BitMatrixPool()
+#define DEC_Image(type, var)	TImage<type>& var = *ImagePool<type>()
+#define DST_BitMatrix(var)		BitMatrixPool(&(var))
+#define DST_Image(var)			ImagePool(&(var))
+#else
+#define DEC_BitMatrix(var)		BitMatrix var;
+#define DEC_Image(type, var)	TImage<type> var;
+#define DST_BitMatrix(var)
+#define DST_Image(var)
+#endif
+
 
 // S T R U C T S ///////////////////////////////////////////////////
 
+typedef float Real;
 typedef Mesh::Vertex Vertex;
 typedef Mesh::VIndex VIndex;
 typedef Mesh::Face Face;
 typedef Mesh::FIndex FIndex;
 
-struct MeshRefine {
-	typedef double Real;
-
+class MeshRefine {
+public:
 	typedef TPoint3<Real> Grad;
 	typedef CLISTDEF0IDX(Grad,VIndex) GradArr;
 
@@ -115,7 +131,7 @@ struct MeshRefine {
 
 
 public:
-	MeshRefine(Scene& _scene, bool _bAlternatePair=true, Real _weightRegularity=1.5f, Real _ratioRigidityElasticity=0.8f, unsigned _nResolutionLevel=0, unsigned _nMinResolution=640, unsigned nMaxViews=8, unsigned nMaxThreads=1);
+	MeshRefine(Scene& _scene, unsigned _nReduceMemory, unsigned _nAlternatePair=true, Real _weightRegularity=1.5f, Real _ratioRigidityElasticity=0.8f, unsigned _nResolutionLevel=0, unsigned _nMinResolution=640, unsigned nMaxViews=8, unsigned nMaxThreads=1);
 	~MeshRefine();
 
 	bool IsValid() const { return !pairs.IsEmpty(); }
@@ -143,25 +159,30 @@ public:
 	static void ImageMeshWarp(
 		const DepthMap& depthMapA, const Camera& cameraA,
 		const DepthMap& depthMapB, const Camera& cameraB,
-		const Image32F& imageB, Image32F& imageA, Image8U& mask);
+		const Image32F& imageB, Image32F& imageA, BitMatrix& mask);
 	static void ComputeLocalVariance(
-		const Image32F& image, const Image8U& mask,
+		const Image32F& image, const BitMatrix& mask,
 		TImage<Real>& imageMean, TImage<Real>& imageVar);
 	static float ComputeLocalZNCC(
 		const Image32F& imageA, const TImage<Real>& imageMeanA, const TImage<Real>& imageVarA,
 		const Image32F& imageB, const TImage<Real>& imageMeanB, const TImage<Real>& imageVarB,
-		const Image8U& mask, TImage<Real>& imageZNCC, TImage<Real>& imageDZNCC);
+		const BitMatrix& mask, TImage<Real>& imageZNCC, TImage<Real>& imageDZNCC);
 	static void ComputePhotometricGradient(
 		const Mesh::FaceArr& faces, const Mesh::NormalArr& normals,
 		const DepthMap& depthMapA, const FaceMap& faceMapA, const BaryMap& baryMapA, const Camera& cameraA,
 		const Camera& cameraB, const View& viewB,
-		const TImage<Real>& imageDZNCC, const Image8U& mask, GradArr& photoGrad, UnsignedArr& photoGradNorm, Real RegularizationScale);
+		const TImage<Real>& imageDZNCC, const BitMatrix& mask, GradArr& photoGrad, UnsignedArr& photoGradNorm, Real RegularizationScale);
 	static float ComputeSmoothnessGradient1(
 		const Mesh::VertexArr& vertices, const Mesh::VertexVerticesArr& vertexVertices, const BoolArr& vertexBoundary,
 		GradArr& smoothGrad1, VIndex idxStart, VIndex idxEnd);
 	static void ComputeSmoothnessGradient2(
 		const GradArr& smoothGrad1, const Mesh::VertexVerticesArr& vertexVertices, const BoolArr& vertexBoundary,
 		GradArr& smoothGrad2, VIndex idxStart, VIndex idxEnd);
+	template<typename TYPE>
+	static TYPE* TypePool(TYPE* = NULL);
+	template<typename TYPE>
+	static inline TImage<TYPE>* ImagePool(TImage<TYPE>* pImage = NULL) { return TypePool< TImage<TYPE> >(pImage); }
+	static inline BitMatrix* BitMatrixPool(BitMatrix* pMask = NULL) { return TypePool<BitMatrix>(pMask); }
 
 	static void* ThreadWorkerTmp(void*);
 	void ThreadWorker();
@@ -178,7 +199,8 @@ public:
 	Real ratioRigidityElasticity; // a scalar ratio used to compute the regularity gradient as a combination of rigidity and elasticity
 	const unsigned nResolutionLevel; // how many times to scale down the images before mesh optimization
 	const unsigned nMinResolution; // how many times to scale down the images before mesh optimization
-	bool bAlternatePair; // using an image pair alternatively as reference image
+	const unsigned nReduceMemory; // recompute image mean and variance in order to reduce memory requirements
+	unsigned nAlternatePair; // using an image pair alternatively as reference image (0 - both, 1 - alternate, 2 - only left, 3 - only right)
 	unsigned iteration; // current refinement iteration
 
 	Scene& scene; // the mesh vertices and faces
@@ -216,6 +238,29 @@ public:
 	static const int HalfSize = 3; // half window size used to compute ZNCC
 };
 
+// call with empty parameter to get an unused image;
+// call with an image pointer retrieved earlier to signal that is not needed anymore
+template<typename TYPE>
+TYPE* MeshRefine::TypePool(TYPE* pObj)
+{
+	typedef CAutoPtr<TYPE> TypePtr;
+	static CriticalSection cs;
+	static cList<TypePtr,TYPE*> objects;
+	static cList<TYPE*,TYPE*> unused;
+	Lock l(cs);
+	if (pObj == NULL) {
+		if (unused.IsEmpty())
+			return objects.AddConstruct(new TYPE);
+		return unused.RemoveTail();
+	} else {
+		ASSERT(objects.Find(pObj) != NO_IDX);
+		ASSERT(unused.Find(pObj) == NO_IDX);
+		unused.Insert(pObj);
+		return NULL;
+	}
+}
+
+
 enum EVENT_TYPE {
 	EVT_JOB = 0,
 	EVT_CLOSE,
@@ -242,12 +287,12 @@ class EVTInitImage : public Event
 {
 public:
 	uint32_t idxImage;
-	double scale, sigma;
+	Real scale, sigma;
 	bool Run(void* pArgs) {
 		((MeshRefine*)pArgs)->ThInitImage(idxImage, scale, sigma);
 		return true;
 	}
-	EVTInitImage(uint32_t _idxImage, double _scale, double _sigma) : Event(EVT_JOB), idxImage(_idxImage), scale(_scale), sigma(_sigma) {}
+	EVTInitImage(uint32_t _idxImage, Real _scale, Real _sigma) : Event(EVT_JOB), idxImage(_idxImage), scale(_scale), sigma(_sigma) {}
 };
 class EVTProjectMesh : public Event
 {
@@ -296,13 +341,14 @@ SEACAVE::cList<SEACAVE::Thread> MeshRefine::threads;
 CriticalSection MeshRefine::cs;
 Semaphore MeshRefine::sem;
 
-MeshRefine::MeshRefine(Scene& _scene, bool _bAlternatePair, Real _weightRegularity, Real _ratioRigidityElasticity, unsigned _nResolutionLevel, unsigned _nMinResolution, unsigned nMaxViews, unsigned nMaxThreads)
+MeshRefine::MeshRefine(Scene& _scene, unsigned _nReduceMemory, unsigned _nAlternatePair, Real _weightRegularity, Real _ratioRigidityElasticity, unsigned _nResolutionLevel, unsigned _nMinResolution, unsigned nMaxViews, unsigned nMaxThreads)
 	:
 	weightRegularity(_weightRegularity),
 	ratioRigidityElasticity(_ratioRigidityElasticity),
 	nResolutionLevel(_nResolutionLevel),
 	nMinResolution(_nMinResolution),
-	bAlternatePair(_bAlternatePair),
+	nReduceMemory(_nReduceMemory),
+	nAlternatePair(_nAlternatePair),
 	scene(_scene),
 	faceNormals(_scene.mesh.faceNormals),
 	vertices(_scene.mesh.vertices),
@@ -574,14 +620,22 @@ double MeshRefine::ScoreMesh(double* gradients)
 	ASSERT(events.IsEmpty());
 	FOREACHPTR(pPair, pairs) {
 		ASSERT(pPair->i < pPair->j);
-		if (bAlternatePair) {
+		switch (nAlternatePair) {
+		case 1:
 			events.AddEvent(iteration%2 ? new EVTProcessPair(pPair->j,pPair->i) : new EVTProcessPair(pPair->i,pPair->j));
-		} else {
+			break;
+		case 2:
+			events.AddEvent(new EVTProcessPair(pPair->i, pPair->j));
+			break;
+		case 3:
+			events.AddEvent(new EVTProcessPair(pPair->j, pPair->i));
+			break;
+		default:
 			for (int ip=0; ip<2; ++ip)
 				events.AddEvent(ip ? new EVTProcessPair(pPair->j,pPair->i) : new EVTProcessPair(pPair->i,pPair->j));
 		}
 	}
-	WaitThreadWorkers(bAlternatePair ? pairs.GetSize() : pairs.GetSize()*2);
+	WaitThreadWorkers(nAlternatePair ? pairs.GetSize() : pairs.GetSize()*2);
 
 	// loop through all vertices and compute the smoothing score
 	scoreSmooth = 0;
@@ -626,7 +680,7 @@ double MeshRefine::ScoreMesh(double* gradients)
 				Cast<double>(photoGrad[v]/photoGradNorm[v] + smoothGrad2[v]*elasticity - smoothGrad1[v]*rigidity) :
 				Cast<double>(smoothGrad2[v]*elasticity - smoothGrad1[v]*rigidity);
 	}
-	return (bAlternatePair ? 0.2f : 0.1f)*scorePhoto + 0.01f*scoreSmooth;
+	return (nAlternatePair ? 0.2f : 0.1f)*scorePhoto + 0.01f*scoreSmooth;
 }
 
 
@@ -756,7 +810,7 @@ void MeshRefine::ProjectMesh(
 void MeshRefine::ImageMeshWarp(
 	const DepthMap& depthMapA, const Camera& cameraA,
 	const DepthMap& depthMapB, const Camera& cameraB,
-	const Image32F& imageB, Image32F& imageA, Image8U& mask)
+	const Image32F& imageB, Image32F& imageA, BitMatrix& mask)
 {
 	ASSERT(!imageA.empty());
 	typedef Sampler::Linear<float> Sampler;
@@ -774,13 +828,13 @@ void MeshRefine::ImageMeshWarp(
 			if (!IsDepthSimilar(depthMapB, pt, ptC.z))
 				continue;
 			imageA(j,i) = imageB.sample<Sampler,Sampler::Type>(sampler, pt);
-			mask(j,i) = 1;
+			mask.set(j,i);
 		}
 	}
 }
 
 // compute local variance for each image pixel
-void MeshRefine::ComputeLocalVariance(const Image32F& image, const Image8U& mask, TImage<Real>& imageMean, TImage<Real>& imageVar)
+void MeshRefine::ComputeLocalVariance(const Image32F& image, const BitMatrix& mask, TImage<Real>& imageMean, TImage<Real>& imageVar)
 {
 	ASSERT(image.size() == mask.size());
 	imageMean.create(image.size());
@@ -790,7 +844,8 @@ void MeshRefine::ComputeLocalVariance(const Image32F& image, const Image8U& mask
 	const int RowsEnd(image.rows-HalfSize);
 	const int ColsEnd(image.cols-HalfSize);
 	const int n(SQUARE(HalfSize*2+1));
-	Image64F imageSum, imageSumSq;
+	DEC_Image(double, imageSum);
+	DEC_Image(double, imageSumSq);
 	#if CV_MAJOR_VERSION > 2
 	cv::integral(image, imageSum, imageSumSq, CV_64F, CV_64F);
 	#else
@@ -807,6 +862,7 @@ void MeshRefine::ComputeLocalVariance(const Image32F& image, const Image8U& mask
 				imageSum(r-HalfSize,   c-HalfSize  ) ) * (1.0/(double)n));
 		}
 	}
+	DST_Image(imageSum);
 	for (int r=HalfSize; r<RowsEnd; ++r) {
 		for (int c=HalfSize; c<ColsEnd; ++c) {
 			if (!mask(r,c))
@@ -819,13 +875,14 @@ void MeshRefine::ComputeLocalVariance(const Image32F& image, const Image8U& mask
 			imageVar(r,c) = MAXF(sumSq-SQUARE(imageMean(r,c)), Real(0.0001));
 		}
 	}
+	DST_Image(imageSumSq);
 }
 
 // compute local ZNCC and its gradient for each image pixel
 float MeshRefine::ComputeLocalZNCC(
 	const Image32F& imageA, const TImage<Real>& imageMeanA, const TImage<Real>& imageVarA,
 	const Image32F& imageB, const TImage<Real>& imageMeanB, const TImage<Real>& imageVarB,
-	const Image8U& mask, TImage<Real>& imageZNCC, TImage<Real>& imageDZNCC)
+	const BitMatrix& mask, TImage<Real>& imageZNCC, TImage<Real>& imageDZNCC)
 {
 	ASSERT(imageA.size() == mask.size() && imageB.size() == mask.size() && !mask.empty());
 	float score(0);
@@ -835,11 +892,15 @@ float MeshRefine::ComputeLocalZNCC(
 	const int ColsEnd(mask.cols-HalfSize);
 	const int n(SQUARE(HalfSize*2+1));
 	imageZNCC.memset(0);
-	Image32F imageAB;
-	cv::multiply(imageA, imageB, imageAB);
-	Image64F imageABSum;
-	cv::integral(imageAB, imageABSum, CV_64F);
-	TImage<Real> imageInvSqrtVAVB(mask.size());
+	DEC_Image(double, imageABSum);
+	{
+		DEC_Image(float, imageAB);
+		cv::multiply(imageA, imageB, imageAB);
+		cv::integral(imageAB, imageABSum, CV_64F);
+		DST_Image(imageAB);
+	}
+	DEC_Image(Real, imageInvSqrtVAVB);
+	imageInvSqrtVAVB.create(mask.size());
 	for (int r=HalfSize; r<RowsEnd; ++r) {
 		for (int c=HalfSize; c<ColsEnd; ++c) {
 			if (!mask(r, c))
@@ -854,6 +915,7 @@ float MeshRefine::ComputeLocalZNCC(
 			imageInvSqrtVAVB(r,c) = invSqrtVAVB;
 		}
 	}
+	DST_Image(imageABSum);
 	imageDZNCC.memset(0);
 	for (int r=HalfSize; r<RowsEnd; ++r) {
 		for (int c=HalfSize; c<ColsEnd; ++c) {
@@ -892,6 +954,7 @@ float MeshRefine::ComputeLocalZNCC(
 			score += (float)(ReliabilityFactor*(Real(1)-ZNCC));
 		}
 	}
+	DST_Image(imageInvSqrtVAVB);
 	return score;
 }
 
@@ -900,7 +963,7 @@ void MeshRefine::ComputePhotometricGradient(
 	const Mesh::FaceArr& faces, const Mesh::NormalArr& normals,
 	const DepthMap& depthMapA, const FaceMap& faceMapA, const BaryMap& baryMapA, const Camera& cameraA,
 	const Camera& cameraB, const View& viewB,
-	const TImage<Real>& imageDZNCC, const Image8U& mask, GradArr& photoGrad, UnsignedArr& photoGradNorm, Real RegularizationScale)
+	const TImage<Real>& imageDZNCC, const BitMatrix& mask, GradArr& photoGrad, UnsignedArr& photoGradNorm, Real RegularizationScale)
 {
 	ASSERT(faces.GetSize() == normals.GetSize() && !faces.IsEmpty());
 	ASSERT(depthMapA.size() == mask.size() && faceMapA.size() == mask.size() && baryMapA.size() == mask.size() && imageDZNCC.size() == mask.size() && !mask.empty());
@@ -1002,7 +1065,7 @@ void MeshRefine::ComputeSmoothnessGradient2(
 			grad += smoothGrad1[idxVert];
 			const VIndex numVert(vertexVertices[idxVert].GetSize());
 			if (numVert > 0)
-				w += REAL(1)/(Real)numVert;
+				w += Real(1)/(Real)numVert;
 		}
 		const Real numVert((Real)verts.GetSize());
 		const Real nrm(Real(1)/(Real(1)+w/numVert));
@@ -1076,8 +1139,10 @@ void MeshRefine::ThInitImage(uint32_t idxImage, Real scale, Real sigma)
 		imageData.width = img.width(); imageData.height = img.height();
 	}
 	imageData.UpdateCamera(scene.platforms);
-	// compute image mean and variance
-	ComputeLocalVariance(img, Image8U(img.size(), 1), view.imageMean, view.imageVar);
+	if (!nReduceMemory) {
+		// compute image mean and variance
+		ComputeLocalVariance(img, BitMatrix(img.size(), 0xFF), view.imageMean, view.imageVar);
+	}
 	// compute image gradient
 	typedef View::Grad::Type GradType;
 	TImage<GradType> grad[2];
@@ -1124,20 +1189,45 @@ void MeshRefine::ThProcessPair(uint32_t idxImageA, uint32_t idxImageB)
 	const Image32F& imageB = viewB.image;
 	const Camera& cameraB = imageDataB.camera;
 	// warp imageB to imageA using the mesh
-	Image8U mask;
-	Image32F imageAB; imageA.copyTo(imageAB);
+	DEC_BitMatrix(mask);
+	DEC_Image(float, imageAB);
+	imageA.copyTo(imageAB);
 	ImageMeshWarp(depthMapA, cameraA, depthMapB, cameraB, imageB, imageAB, mask);
-	// init vertex textures
-	const TImage<Real>& imageMeanA = viewA.imageMean;
-	const TImage<Real>& imageVarA = viewA.imageVar;
-	TImage<Real> imageMeanAB, imageVarAB;
+	// compute ZNCC and its gradient
+	const TImage<Real> *imageMeanA, *imageVarA;
+	if (nReduceMemory) {
+		DEC_Image(Real, _imageMeanA);
+		DEC_Image(Real, _imageVarA);
+		ComputeLocalVariance(viewA.image, mask, _imageMeanA, _imageVarA);
+		imageMeanA = &_imageMeanA;
+		imageVarA = &_imageVarA;
+	} else {
+		imageMeanA = &viewA.imageMean;
+		imageVarA = &viewA.imageVar;
+	}
+	DEC_Image(Real, imageMeanAB);
+	DEC_Image(Real, imageVarAB);
 	ComputeLocalVariance(imageAB, mask, imageMeanAB, imageVarAB);
-	TImage<Real> imageZNCC, imageDZNCC;
-	const float score(ComputeLocalZNCC(imageA, imageMeanA, imageVarA, imageAB, imageMeanAB, imageVarAB, mask, imageZNCC, imageDZNCC));
+	DEC_Image(Real, imageZNCC);
+	DEC_Image(Real, imageDZNCC);
+	const float score(ComputeLocalZNCC(imageA, *imageMeanA, *imageVarA, imageAB, imageMeanAB, imageVarAB, mask, imageZNCC, imageDZNCC));
+	#ifdef MESHOPT_TYPEPOOL
+	DST_Image(imageZNCC);
+	DST_Image(imageVarAB);
+	DST_Image(imageMeanAB);
+	if (nReduceMemory) {
+		DST_Image(*((TImage<Real>*)imageMeanA));
+		DST_Image(*((TImage<Real>*)imageVarA));
+	}
+	DST_Image(imageAB);
+	#endif
+	// compute field gradient
 	GradArr _photoGrad(photoGrad.GetSize());
 	UnsignedArr _photoGradNorm(photoGrad.GetSize());
 	const Real RegularizationScale((Real)((REAL)(imageDataA.avgDepth*imageDataB.avgDepth)/(cameraA.GetFocalLength()*cameraB.GetFocalLength())));
 	ComputePhotometricGradient(faces, faceNormals, depthMapA, faceMapA, baryMapA, cameraA, cameraB, viewB, imageDZNCC, mask, _photoGrad, _photoGradNorm, RegularizationScale);
+	DST_Image(imageDZNCC);
+	DST_BitMatrix(mask);
 	Lock l(cs);
 	if (vertexDepth.IsEmpty()) {
 		FOREACH(i, photoGrad) {
@@ -1241,19 +1331,20 @@ protected:
 // fThPlanarVertex - threshold used to remove vertices on planar patches (percentage of the minimum depth, 0 - disable)
 bool Scene::RefineMesh(unsigned nResolutionLevel, unsigned nMinResolution, unsigned nMaxViews,
 					   float fDecimateMesh, unsigned nCloseHoles, unsigned nEnsureEdgeSize, unsigned nMaxFaceArea,
-					   unsigned nScales, float fScaleStep, bool bAlternatePair, float fRegularityWeight, float fRatioRigidityElasticity, float fThPlanarVertex, float fGradientStep)
+					   unsigned nScales, float fScaleStep,
+					   unsigned nReduceMemory, unsigned nAlternatePair, float fRegularityWeight, float fRatioRigidityElasticity, float fThPlanarVertex, float fGradientStep)
 {
-	MeshRefine refine(*this, bAlternatePair, fRegularityWeight, fRatioRigidityElasticity, nResolutionLevel, nMinResolution, nMaxViews, nMaxThreads);
+	MeshRefine refine(*this, nReduceMemory, nAlternatePair, fRegularityWeight, fRatioRigidityElasticity, nResolutionLevel, nMinResolution, nMaxViews, nMaxThreads);
 	if (!refine.IsValid())
 		return false;
 
 	// run the mesh optimization on multiple scales (coarse to fine)
 	for (unsigned nScale=0; nScale<nScales; ++nScale) {
 		// init images
-		const double scale(powi(fScaleStep, (int)(nScales-nScale-1)));
-		const double step(powi(2.0, (int)(nScales-nScale)));
+		const Real scale(powi(fScaleStep, (int)(nScales-nScale-1)));
+		const Real step(powi(2.f, (int)(nScales-nScale)));
 		DEBUG_ULTIMATE("Refine mesh at: %.2f image scale", scale);
-		if (!refine.InitImages(scale, 0.12*step+0.2))
+		if (!refine.InitImages(scale, Real(0.12)*step+Real(0.2)))
 			return false;
 
 		// extract array of triangles incident to each vertex
@@ -1319,7 +1410,7 @@ bool Scene::RefineMesh(unsigned nResolutionLevel, unsigned nMinResolution, unsig
 			Eigen::Matrix<double,Eigen::Dynamic,3,Eigen::RowMajor> gradients(refine.vertices.GetSize(),3);
 			for (int iter=0; iter<iters; ++iter) {
 				refine.iteration = (unsigned)iter;
-				refine.bAlternatePair = (iter+1 < iters ? bAlternatePair : false);
+				refine.nAlternatePair = (iter+1 < iters ? nAlternatePair : 0);
 				refine.ratioRigidityElasticity = (iter <= iterStop ? fRatioRigidityElasticity : 1.f);
 				const bool bAdaptMesh(iter >= iterStart && (iter-iterStart)%3 == 0 && iters-iter > 5);
 				// evaluate residuals and gradients

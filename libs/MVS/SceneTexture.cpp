@@ -1,16 +1,12 @@
 /*
 * SceneTexture.cpp
 *
-* Copyright (c) 2014-2015 FOXEL SA - http://foxel.ch
-* Please read <http://foxel.ch/license> for more information.
-*
+* Copyright (c) 2014-2015 SEACAVE
 *
 * Author(s):
 *
 *      cDc <cdc.seacave@gmail.com>
 *
-*
-* This file is part of the FOXEL project <http://foxel.ch>.
 *
 * This program is free software: you can redistribute it and/or modify
 * it under the terms of the GNU Affero General Public License as published by
@@ -31,9 +27,6 @@
 *      You are required to preserve legal notices and author attributions in
 *      that material or in the Appropriate Legal Notices displayed by works
 *      containing it.
-*
-*      You are required to attribute the work as explained in the "Usage and
-*      Attribution" section of <http://foxel.ch/license>.
 */
 
 #include "Common.h"
@@ -395,12 +388,12 @@ public:
 	bool FaceOutlierDetection(FaceDataArr& faceDatas, float fOutlierThreshold) const;
 	#endif
 
-	void FaceViewSelection(float fOutlierThreshold);
+	void FaceViewSelection(float fOutlierThreshold, float fRatioDataSmoothness);
 
 	void CreateSeamVertices();
 	void GlobalSeamLeveling();
 	void LocalSeamLeveling();
-	void GenerateTexture(bool bGlobalSeamLeveling, bool bLocalSeamLeveling);
+	void GenerateTexture(bool bGlobalSeamLeveling, bool bLocalSeamLeveling, unsigned nTextureSizeMultiple, unsigned nRectPackingHeuristic, Pixel8U colEmpty);
 
 	template <typename PIXEL>
 	static inline PIXEL RGB2YCBCR(const PIXEL& v) {
@@ -424,7 +417,7 @@ public:
 	}
 
 
-private:
+protected:
 	static void ProcessMask(Image8U& mask, int stripWidth);
 	static void PoissonBlending(const Image32F3& src, Image32F3& dst, const Image8U& mask, float bias=1.f);
 
@@ -874,7 +867,7 @@ bool MeshTexture::FaceOutlierDetection(FaceDataArr& faceDatas, float thOutlier) 
 }
 #endif
 
-void MeshTexture::FaceViewSelection(float fOutlierThreshold)
+void MeshTexture::FaceViewSelection(float fOutlierThreshold, float fRatioDataSmoothness)
 {
 	// extract array of triangles incident to each vertex
 	ListVertexFaces();
@@ -987,6 +980,7 @@ void MeshTexture::FaceViewSelection(float fOutlierThreshold)
 
 			// set data costs
 			{
+				const LBPInference::EnergyType MaxEnergy(fRatioDataSmoothness*LBPInference::MaxEnergy);
 				// set costs for label 0 (undefined)
 				FOREACH(s, inferences) {
 					LBPInference& inference = inferences[s];
@@ -994,7 +988,7 @@ void MeshTexture::FaceViewSelection(float fOutlierThreshold)
 						continue;
 					const NodeID numNodes(sizes[s]);
 					for (NodeID nodeID=0; nodeID<numNodes; ++nodeID)
-						inference.SetDataCost((Label)0, nodeID, LBPInference::MaxEnergy);
+						inference.SetDataCost((Label)0, nodeID, MaxEnergy);
 				}
 				// set data costs for all labels (except label 0 - undefined)
 				FOREACH(f, facesDatas) {
@@ -1007,7 +1001,7 @@ void MeshTexture::FaceViewSelection(float fOutlierThreshold)
 						const FaceData& faceData = *pFaceData;
 						const Label label((Label)faceData.idxView+1);
 						const float normalizedQuality(faceData.quality>=normQuality ? 1.f : faceData.quality/normQuality);
-						const float dataCost((1.f-normalizedQuality)*LBPInference::MaxEnergy);
+						const float dataCost((1.f-normalizedQuality)*MaxEnergy);
 						inference.SetDataCost(label, nodeID, dataCost);
 					}
 				}
@@ -1396,7 +1390,7 @@ void MeshTexture::GlobalSeamLeveling()
 			// subtract mean since the system is under-constrained and
 			// we need the solution with minimal adjustments
 			Eigen::Map< Eigen::VectorXf, Eigen::Unaligned, Eigen::Stride<0,3> >(colorAdjustments.data()+channel, rowsX) = x.array() - x.mean();
-			DEBUG_ULTIMATE("\tcolor channel %d: %d iterations, %g residual", channel, solver.iterations(), solver.error());
+			DEBUG_LEVEL(3, "\tcolor channel %d: %d iterations, %g residual", channel, solver.iterations(), solver.error());
 		}
 	}
 
@@ -1486,8 +1480,8 @@ void MeshTexture::ProcessMask(Image8U& mask, int stripWidth)
 	#undef DILATEDIR
 	#define ERODEDIR(rd,cd) { \
 		const int rl(r-(rd)), cl(c-(cd)), rr(r+(rd)), cr(c+(cd)); \
-		const Type vl(mask.isInside(ImageRef(cl,rl)) ? mask(rl,cl) : empty); \
-		const Type vr(mask.isInside(ImageRef(cr,rr)) ? mask(rr,cr) : empty); \
+		const Type vl(mask.isInside(ImageRef(cl,rl)) ? mask(rl,cl) : uint8_t(empty)); \
+		const Type vr(mask.isInside(ImageRef(cr,rr)) ? mask(rr,cr) : uint8_t(empty)); \
 		if ((vl == border && vr == empty) || (vr == border && vl == empty)) { \
 			v = empty; \
 			continue; \
@@ -1841,7 +1835,7 @@ void MeshTexture::LocalSeamLeveling()
 	}
 }
 
-void MeshTexture::GenerateTexture(bool bGlobalSeamLeveling, bool bLocalSeamLeveling)
+void MeshTexture::GenerateTexture(bool bGlobalSeamLeveling, bool bLocalSeamLeveling, unsigned nTextureSizeMultiple, unsigned nRectPackingHeuristic, Pixel8U colEmpty)
 {
 	// project patches in the corresponding view and compute texture-coordinates and bounding-box
 	const int border(2);
@@ -1904,12 +1898,18 @@ void MeshTexture::GenerateTexture(bool bGlobalSeamLeveling, bool bLocalSeamLevel
 		CreateSeamVertices();
 
 		// perform global seam leveling
-		if (bGlobalSeamLeveling)
+		if (bGlobalSeamLeveling) {
+			TD_TIMER_STARTD();
 			GlobalSeamLeveling();
+			DEBUG_ULTIMATE("\tglobal seam leveling completed (%s)", TD_TIMER_GET_FMT().c_str());
+		}
 
 		// perform local seam leveling
-		if (bLocalSeamLeveling)
+		if (bLocalSeamLeveling) {
+			TD_TIMER_STARTD();
 			LocalSeamLeveling();
+			DEBUG_ULTIMATE("\tlocal seam leveling completed (%s)", TD_TIMER_GET_FMT().c_str());
+		}
 	}
 
 	// merge texture patches with overlapping rectangles
@@ -1921,7 +1921,7 @@ void MeshTexture::GenerateTexture(bool bGlobalSeamLeveling, bool bLocalSeamLevel
 			TexturePatch& texturePatchSmall = texturePatches[j];
 			if (texturePatchBig.label != texturePatchSmall.label)
 				continue;
-			if (!IsContainedIn(texturePatchSmall.rect, texturePatchBig.rect))
+			if (!RectsBinPack::IsContainedIn(texturePatchSmall.rect, texturePatchBig.rect))
 				continue;
 			// translate texture coordinates
 			const TexCoord offset(texturePatchSmall.rect.tl()-texturePatchBig.rect.tl());
@@ -1944,11 +1944,32 @@ void MeshTexture::GenerateTexture(bool bGlobalSeamLeveling, bool bLocalSeamLevel
 		RectsBinPack::RectArr rects(texturePatches.GetSize());
 		FOREACH(i, texturePatches)
 			rects[i] = texturePatches[i].rect;
-		int textureSize(RectsBinPack::ComputeTextureSize(rects));
+		int textureSize(RectsBinPack::ComputeTextureSize(rects, nTextureSizeMultiple));
 		// increase texture size till all patches fit
 		while (true) {
-			RectsBinPack pack(textureSize, textureSize);
-			if (pack.Insert(rects))
+			TD_TIMER_STARTD();
+			bool bPacked(false);
+			const unsigned typeRectsBinPack(nRectPackingHeuristic/100);
+			const unsigned typeSplit((nRectPackingHeuristic-typeRectsBinPack*100)/10);
+			const unsigned typeHeuristic(nRectPackingHeuristic%10);
+			switch (typeRectsBinPack) {
+			case 0: {
+				MaxRectsBinPack pack(textureSize, textureSize);
+				bPacked = pack.Insert(rects, (MaxRectsBinPack::FreeRectChoiceHeuristic)typeHeuristic);
+				break; }
+			case 1: {
+				SkylineBinPack pack(textureSize, textureSize, typeSplit!=0);
+				bPacked = pack.Insert(rects, (SkylineBinPack::LevelChoiceHeuristic)typeHeuristic);
+				break; }
+			case 2: {
+				GuillotineBinPack pack(textureSize, textureSize);
+				bPacked = pack.Insert(rects, false, (GuillotineBinPack::FreeRectChoiceHeuristic)typeHeuristic, (GuillotineBinPack::GuillotineSplitHeuristic)typeSplit);
+				break; }
+			default:
+				ABORT("error: unknown RectsBinPack type");
+			}
+			DEBUG_ULTIMATE("\tpacking texture completed: %u patches, %u texture-size (%s)", rects.GetSize(), textureSize, TD_TIMER_GET_FMT().c_str());
+			if (bPacked)
 				break;
 			textureSize *= 2;
 		}
@@ -1956,7 +1977,7 @@ void MeshTexture::GenerateTexture(bool bGlobalSeamLeveling, bool bLocalSeamLevel
 		// create texture image
 		const float invNorm(1.f/(float)(textureSize-1));
 		textureDiffuse.create(textureSize, textureSize);
-		textureDiffuse.setTo(cv::Scalar(39, 127, 255));
+		textureDiffuse.setTo(cv::Scalar(colEmpty.b, colEmpty.g, colEmpty.r));
 		#ifdef TEXOPT_USE_OPENMP
 		#pragma omp parallel for schedule(dynamic)
 		for (int_t i=0; i<(int_t)texturePatches.GetSize(); ++i) {
@@ -1999,7 +2020,7 @@ void MeshTexture::GenerateTexture(bool bGlobalSeamLeveling, bool bLocalSeamLevel
 }
 
 // texture mesh
-bool Scene::TextureMesh(unsigned nResolutionLevel, unsigned nMinResolution, float fOutlierThreshold, bool bGlobalSeamLeveling, bool bLocalSeamLeveling)
+bool Scene::TextureMesh(unsigned nResolutionLevel, unsigned nMinResolution, float fOutlierThreshold, float fRatioDataSmoothness, bool bGlobalSeamLeveling, bool bLocalSeamLeveling, unsigned nTextureSizeMultiple, unsigned nRectPackingHeuristic, Pixel8U colEmpty)
 {
 	MeshTexture texture(*this, nResolutionLevel, nMinResolution);
 
@@ -2014,14 +2035,14 @@ bool Scene::TextureMesh(unsigned nResolutionLevel, unsigned nMinResolution, floa
 	// assign the best view to each face
 	{
 		TD_TIMER_STARTD();
-		texture.FaceViewSelection(fOutlierThreshold);
+		texture.FaceViewSelection(fOutlierThreshold, fRatioDataSmoothness);
 		DEBUG_EXTRA("Assigning the best view to each face completed: %u faces (%s)", mesh.faces.GetSize(), TD_TIMER_GET_FMT().c_str());
 	}
 
 	// generate the texture image and atlas
 	{
 		TD_TIMER_STARTD();
-		texture.GenerateTexture(bGlobalSeamLeveling, bLocalSeamLeveling);
+		texture.GenerateTexture(bGlobalSeamLeveling, bLocalSeamLeveling, nTextureSizeMultiple, nRectPackingHeuristic, colEmpty);
 		DEBUG_EXTRA("Generating texture atlas and image completed: %u patches, %u image size (%s)", texture.texturePatches.GetSize(), mesh.textureDiffuse.width(), TD_TIMER_GET_FMT().c_str());
 	}
 
