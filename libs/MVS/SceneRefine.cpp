@@ -246,7 +246,7 @@ TYPE* MeshRefine::TypePool(TYPE* pObj)
 	typedef CAutoPtr<TYPE> TypePtr;
 	static CriticalSection cs;
 	static cList<TypePtr,TYPE*> objects;
-	static cList<TYPE*,TYPE*> unused;
+	static cList<TYPE*,TYPE*,0> unused;
 	Lock l(cs);
 	if (pObj == NULL) {
 		if (unused.IsEmpty())
@@ -782,7 +782,7 @@ void MeshRefine::ProjectMesh(
 		const Point3 faceCenter((ptc[0]+ptc[1]+ptc[2])/3);
 		// skip face if the (cos) angle between
 		// the view to face vector and the view direction is negative
-		if (faceCenter.z < 0)
+		if (faceCenter.z <= 0)
 			continue;
 		// compute the plane defined by the 3 points
 		const Point3 edge1(ptc[1]-ptc[0]);
@@ -1408,6 +1408,8 @@ bool Scene::RefineMesh(unsigned nResolutionLevel, unsigned nMinResolution, unsig
 			const int iterStop(iters*7/10);
 			const int iterStart(fThPlanarVertex > 0 ? iters*4/10 : INT_MAX);
 			Eigen::Matrix<double,Eigen::Dynamic,3,Eigen::RowMajor> gradients(refine.vertices.GetSize(),3);
+			Util::Progress progress(_T("Processed iterations"), iters);
+			GET_LOGCONSOLE().Pause();
 			for (int iter=0; iter<iters; ++iter) {
 				refine.iteration = (unsigned)iter;
 				refine.nAlternatePair = (iter+1 < iters ? nAlternatePair : 0);
@@ -1454,7 +1456,10 @@ bool Scene::RefineMesh(unsigned nResolutionLevel, unsigned nMinResolution, unsig
 				}
 				DEBUG_EXTRA("\t%2d. f: %.5f (%.4e)\tg: %.5f (%.4e - %.4e)\ts: %.3f\tv: %5u", iter+1, cost, cost/refine.vertices.GetSize(), gradients.norm(), gradients.norm()/refine.vertices.GetSize(), gv/refine.vertices.GetSize(), gstep, numVertsRemoved);
 				gstep *= 0.98;
+				progress.display(iter);
 			}
+			GET_LOGCONSOLE().Play();
+			progress.close();
 		}
 
 		#if TD_VERBOSE != TD_VERBOSE_OFF

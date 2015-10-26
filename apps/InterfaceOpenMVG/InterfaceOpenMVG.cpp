@@ -33,6 +33,13 @@
 #include "../../libs/MVS/Common.h"
 #include "../../libs/MVS/Scene.h"
 #include <boost/program_options.hpp>
+#ifdef _USE_OPENMVG
+#undef D2R
+#undef R2D
+#include <openMVG/sfm/sfm_data.hpp>
+#include <openMVG/sfm/sfm_data_io.hpp>
+#include <openMVG/image/image.hpp>
+#endif
 
 
 // D E F I N E S ///////////////////////////////////////////////////
@@ -40,6 +47,7 @@
 #define APPNAME _T("InterfaceOpenMVG")
 #define MVS_EXT _T(".mvs")
 #define MVG_EXT _T(".baf")
+#define MVG2_EXT _T(".json")
 
 
 // S T R U C T S ///////////////////////////////////////////////////
@@ -312,11 +320,15 @@ bool ExportScene(const std::string& sList_filename, const std::string& sBaf_file
 
 
 namespace OPT {
+#ifdef _USE_OPENMVG
+bool bOpenMVGjson; // new import format
+#endif
 bool bOpenMVS2OpenMVG; // conversion direction
 bool bNormalizeIntrinsics;
 String strListFileName;
 String strInputFileName;
 String strOutputFileName;
+String strOutputImageFolder;
 unsigned nArchiveType;
 int nProcessPriority;
 unsigned nMaxThreads;
@@ -357,6 +369,7 @@ bool Initialize(size_t argc, LPCTSTR* argv)
 		("images-list-file,l", boost::program_options::value<std::string>(&OPT::strListFileName), "input filename containing image list")
 		("input-file,i", boost::program_options::value<std::string>(&OPT::strInputFileName), "input filename containing camera poses and image list")
 		("output-file,o", boost::program_options::value<std::string>(&OPT::strOutputFileName), "output filename for storing the mesh")
+		("output-image-folder", boost::program_options::value<std::string>(&OPT::strOutputImageFolder)->default_value("undistorted_images"), "output folder to store undistorted images")
 		("normalize,f", boost::program_options::value<bool>(&OPT::bNormalizeIntrinsics)->default_value(true), "normalize intrinsics while exporting to OpenMVS format")
 		;
 
@@ -398,23 +411,30 @@ bool Initialize(size_t argc, LPCTSTR* argv)
 	Util::ensureUnifySlash(OPT::strListFileName);
 	Util::ensureValidPath(OPT::strInputFileName);
 	Util::ensureUnifySlash(OPT::strInputFileName);
-	if (OPT::vm.count("help") || OPT::strListFileName.IsEmpty() || OPT::strInputFileName.IsEmpty()) {
+	Util::ensureUnifySlash(OPT::strOutputImageFolder);
+	Util::ensureDirectorySlash(OPT::strOutputImageFolder);
+	const String strInputFileNameExt(Util::getFileExt(OPT::strInputFileName).ToLower());
+	OPT::bOpenMVS2OpenMVG = (strInputFileNameExt == MVS_EXT);
+	#ifdef _USE_OPENMVG
+	OPT::bOpenMVGjson = (strInputFileNameExt == MVG2_EXT);
+	const bool bInvalidCommand(OPT::strInputFileName.IsEmpty() || (OPT::strListFileName.IsEmpty() && !OPT::bOpenMVGjson && !OPT::bOpenMVS2OpenMVG));
+	#else
+	const bool bInvalidCommand(OPT::strInputFileName.IsEmpty() || (OPT::strListFileName.IsEmpty() && !OPT::bOpenMVS2OpenMVG));
+	#endif
+	if (OPT::vm.count("help") || bInvalidCommand) {
 		boost::program_options::options_description visible("Available options");
 		visible.add(generic).add(config);
 		GET_LOG() << visible;
 	}
-	if (OPT::strInputFileName.IsEmpty())
+	if (bInvalidCommand)
 		return false;
 
 	// initialize optional options
-	if (OPT::strListFileName.IsEmpty() || OPT::strInputFileName.IsEmpty())
-		return false;
 	Util::ensureValidPath(OPT::strOutputFileName);
 	Util::ensureUnifySlash(OPT::strOutputFileName);
-	OPT::bOpenMVS2OpenMVG = (Util::getFileExt(OPT::strInputFileName) == MVS_EXT);
 	if (OPT::bOpenMVS2OpenMVG) {
 		if (OPT::strOutputFileName.IsEmpty())
-			OPT::strOutputFileName = Util::getFullFileName(OPT::strInputFileName) + MVG_EXT;
+			OPT::strOutputFileName = Util::getFullFileName(OPT::strInputFileName);
 	} else {
 		if (OPT::strOutputFileName.IsEmpty())
 			OPT::strOutputFileName = Util::getFullFileName(OPT::strInputFileName) + MVS_EXT;
@@ -471,7 +491,7 @@ int main(int argc, LPCTSTR* argv)
 			const MVS::Platform& platform = scene.platforms[p];
 			if (platform.cameras.GetSize() != 1) {
 				LOG("error: unsupported scene structure");
-				return false;
+				return EXIT_FAILURE;
 			}
 			const MVS::Platform::Camera& camera = platform.cameras[0];
 			openMVS::MVS_IO::Camera cameraBAF;
@@ -507,18 +527,121 @@ int main(int argc, LPCTSTR* argv)
 		}
 
 		// write OpenMVG input data
-		openMVS::MVS_IO::ExportScene(MAKE_PATH_SAFE(OPT::strListFileName), MAKE_PATH_SAFE(OPT::strOutputFileName), sceneBAF);
+		const String strOutputFileNameMVG(OPT::strOutputFileName + MVG_EXT);
+		openMVS::MVS_IO::ExportScene(MAKE_PATH_SAFE(OPT::strListFileName), MAKE_PATH_SAFE(strOutputFileNameMVG), sceneBAF);
 
 		VERBOSE("Input data exported: %u cameras & %u poses & %u images & %u vertices (%s)", sceneBAF.cameras.size(), sceneBAF.poses.size(), sceneBAF.images.size(), sceneBAF.vertices.size(), TD_TIMER_GET_FMT().c_str());
 	} else {
-		// read OpenMVG input data
+		// convert data from OpenMVG to OpenMVS
+		MVS::Scene scene(OPT::nMaxThreads);
+		size_t nCameras(0), nPoses(0);
+
+	#ifdef _USE_OPENMVG
+	if (OPT::bOpenMVGjson) {
+		// read OpenMVG input data from a JSON file
+		using namespace openMVG::sfm;
+		using namespace openMVG::cameras;
+		SfM_Data sfm_data;
+		const String strSfM_Data_Filename(MAKE_PATH_SAFE(OPT::strInputFileName));
+		if (!Load(sfm_data, strSfM_Data_Filename, ESfM_Data(ALL))) {
+			VERBOSE("error: the input SfM_Data file '%s' cannot be read", strSfM_Data_Filename.c_str());
+			return EXIT_FAILURE;
+		}
+		VERBOSE("Imported data: %u cameras, %u poses, %u images, %u vertices",
+				sfm_data.GetIntrinsics().size(),
+				sfm_data.GetPoses().size(),
+				sfm_data.GetViews().size(),
+				sfm_data.GetLandmarks().size());
+
+		// OpenMVG can have not contiguous index, use a map to create the required OpenMVS contiguous ID index
+		std::map<openMVG::IndexT, uint32_t> map_intrinsic, map_view;
+
+		// define a platform with all the intrinsic group
+		nCameras = sfm_data.GetIntrinsics().size();
+		for (const auto& intrinsic: sfm_data.GetIntrinsics()) {
+			if (isPinhole(intrinsic.second.get()->getType())) {
+				const Pinhole_Intrinsic * cam = dynamic_cast<const Pinhole_Intrinsic*>(intrinsic.second.get());
+				if (map_intrinsic.count(intrinsic.first) == 0)
+					map_intrinsic.insert(std::make_pair(intrinsic.first, scene.platforms.GetSize()));
+				MVS::Platform& platform = scene.platforms.AddEmpty();
+				// add the camera
+				MVS::Platform::Camera& camera = platform.cameras.AddEmpty();
+				camera.K = cam->K();
+				// sub-pose
+				camera.R = RMatrix::IDENTITY;
+				camera.C = CMatrix::ZERO;
+			}
+		}
+
+		// define images & poses
+		Util::Progress progress(_T("Processed images"), sfm_data.GetViews().size());
+		scene.images.Reserve((uint32_t)sfm_data.GetViews().size());
+		for (const auto& view : sfm_data.GetViews()) {
+			map_view[view.first] = scene.images.GetSize();
+			MVS::Image& image = scene.images.AddEmpty();
+			image.name = OPT::strOutputImageFolder + view.second->s_Img_path;
+			Util::ensureUnifySlash(image.name);
+			image.name = MAKE_PATH_FULL(WORKING_FOLDER_FULL, image.name);
+			Util::ensureDirectory(image.name);
+			image.platformID = map_intrinsic.at(view.second->id_intrinsic);
+			MVS::Platform& platform = scene.platforms[image.platformID];
+			image.cameraID = 0;
+
+			openMVG::image::Image<openMVG::image::RGBColor> imageRGB, imageRGB_ud;
+			String pathRoot(sfm_data.s_root_path); Util::ensureDirectorySlash(pathRoot);
+			const String srcImage(MAKE_PATH_FULL(WORKING_FOLDER_FULL, pathRoot+view.second->s_Img_path));
+			const String& dstImage(image.name);
+
+			if (sfm_data.IsPoseAndIntrinsicDefined(view.second.get())) {
+				image.poseID = platform.poses.GetSize();
+				MVS::Platform::Pose& pose = platform.poses.AddEmpty();
+				const openMVG::geometry::Pose3 poseMVG = sfm_data.GetPoseOrDie(view.second.get());
+				pose.R = poseMVG.rotation();
+				pose.C = poseMVG.center();
+				// export undistorted images
+				const openMVG::cameras::IntrinsicBase * cam = sfm_data.GetIntrinsics().at(view.second->id_intrinsic).get();
+				if (cam->have_disto())  {
+					// undistort and save the image
+					openMVG::image::ReadImage(srcImage, &imageRGB);
+					openMVG::cameras::UndistortImage(imageRGB, cam, imageRGB_ud, openMVG::image::BLACK);
+					openMVG::image::WriteImage(dstImage, imageRGB_ud);
+				} else  {
+					// no distortion, copy the image
+					File::copyFile(srcImage, dstImage);
+				}
+				++nPoses;
+			} else {
+				// image have not valid pose, so set an undefined pose
+				image.poseID = NO_ID;
+				// just copy the image
+				File::copyFile(srcImage, dstImage);
+			}
+			progress.display(scene.images.GetSize());
+		}
+		progress.close();
+
+		// define structure
+		scene.pointcloud.points.Reserve(sfm_data.GetLandmarks().size());
+		scene.pointcloud.pointViews.Reserve(sfm_data.GetLandmarks().size());
+		for (const auto& vertex: sfm_data.GetLandmarks()) {
+			const Landmark & landmark = vertex.second;
+			MVS::PointCloud::Point& point = scene.pointcloud.points.AddEmpty();
+			point = landmark.X.cast<float>();
+			MVS::PointCloud::ViewArr& views = scene.pointcloud.pointViews.AddEmpty();
+			for (const auto& observation: landmark.obs)
+				views.InsertSort(map_view.at(observation.first));
+		}
+	} else
+	#endif
+	{
+		// read OpenMVG input data from BAF file
 		openMVS::MVS_IO::SfM_Scene sceneBAF;
 		if (!openMVS::MVS_IO::ImportScene(MAKE_PATH_SAFE(OPT::strListFileName), MAKE_PATH_SAFE(OPT::strInputFileName), sceneBAF))
 			return EXIT_FAILURE;
 
 		// convert data from OpenMVG to OpenMVS
-		MVS::Scene scene(OPT::nMaxThreads);
-		scene.platforms.Reserve((uint32_t)sceneBAF.cameras.size());
+		nCameras = sceneBAF.cameras.size();
+		scene.platforms.Reserve((uint32_t)nCameras);
 		for (const auto& cameraBAF: sceneBAF.cameras) {
 			MVS::Platform& platform = scene.platforms.AddEmpty();
 			MVS::Platform::Camera& camera = platform.cameras.AddEmpty();
@@ -526,7 +649,8 @@ int main(int argc, LPCTSTR* argv)
 			camera.R = RMatrix::IDENTITY;
 			camera.C = CMatrix::ZERO;
 		}
-		scene.images.Reserve((uint32_t)sceneBAF.images.size());
+		nPoses = sceneBAF.images.size();
+		scene.images.Reserve((uint32_t)nPoses);
 		for (const auto& imageBAF: sceneBAF.images) {
 			openMVS::MVS_IO::Pose& poseBAF = sceneBAF.poses[imageBAF.id_pose];
 			MVS::Image& image = scene.images.AddEmpty();
@@ -548,8 +672,10 @@ int main(int argc, LPCTSTR* argv)
 			point = vertexBAF.X.cast<float>();
 			MVS::PointCloud::ViewArr& views = scene.pointcloud.pointViews.AddEmpty();
 			for (const auto& viewBAF: vertexBAF.views)
-				views.Insert(viewBAF);
+				views.InsertSort(viewBAF);
 		}
+	}
+
 		// read images meta-data
 		FOREACHPTR(pImage, scene.images) {
 			if (!pImage->ReloadImage(0, false))
@@ -585,7 +711,9 @@ int main(int argc, LPCTSTR* argv)
 		// write OpenMVS input data
 		scene.Save(MAKE_PATH_SAFE(OPT::strOutputFileName), (ARCHIVE_TYPE)OPT::nArchiveType);
 
-		VERBOSE("Input data imported: %u cameras, %u poses, %u images, %u vertices (%s)", sceneBAF.cameras.size(), sceneBAF.poses.size(), sceneBAF.images.size(), sceneBAF.vertices.size(), TD_TIMER_GET_FMT().c_str());
+		VERBOSE("Exported data: %u platforms, %u cameras, %u poses, %u images, %u vertices (%s)",
+				scene.platforms.GetSize(), nCameras, nPoses, scene.images.GetSize(), scene.pointcloud.GetSize(),
+				TD_TIMER_GET_FMT().c_str());
 	}
 
 	Finalize();

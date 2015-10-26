@@ -49,6 +49,7 @@
 namespace OPT {
 String strInputFileName;
 String strOutputFileName;
+String strOutputImageFolder;
 unsigned nArchiveType;
 int nProcessPriority;
 unsigned nMaxThreads;
@@ -88,6 +89,7 @@ bool Initialize(size_t argc, LPCTSTR* argv)
 	config.add_options()
 		("input-file,i", boost::program_options::value<std::string>(&OPT::strInputFileName), "input filename containing camera poses and image list")
 		("output-file,o", boost::program_options::value<std::string>(&OPT::strOutputFileName), "output filename for storing the mesh")
+		("output-image-folder", boost::program_options::value<std::string>(&OPT::strOutputImageFolder)->default_value("undistorted_images"), "output folder to store undistorted images")
 		;
 
 	boost::program_options::options_description cmdline_options;
@@ -139,6 +141,8 @@ bool Initialize(size_t argc, LPCTSTR* argv)
 		return false;
 	Util::ensureValidPath(OPT::strOutputFileName);
 	Util::ensureUnifySlash(OPT::strOutputFileName);
+	Util::ensureUnifySlash(OPT::strOutputImageFolder);
+	Util::ensureDirectorySlash(OPT::strOutputImageFolder);
 	if (OPT::strOutputFileName.IsEmpty())
 		OPT::strOutputFileName = Util::getFullFileName(OPT::strInputFileName) + MVS_EXT;
 
@@ -341,11 +345,12 @@ int main(int argc, LPCTSTR* argv)
 	scene.pointcloud.pointViews.Resize(vertices.size());
 	for (size_t idx=0; idx<measurements.size(); ++idx) {
 		MVS::PointCloud::ViewArr& views = scene.pointcloud.pointViews[correspondingPoint[idx]];
-		views.Insert(correspondingView[idx]);
+		views.InsertSort(correspondingView[idx]);
 	}
 
 	// undistort images
-	const String pathData(MAKE_PATH("images/"));
+	const String pathData(MAKE_PATH_FULL(WORKING_FOLDER_FULL, OPT::strOutputImageFolder));
+	Util::Progress progress(_T("Processed images"), scene.images.GetSize());
 	#ifdef _USE_OPENMP
 	bool bAbort(false);
 	#pragma omp parallel for shared(bAbort) schedule(dynamic)
@@ -356,6 +361,7 @@ int main(int argc, LPCTSTR* argv)
 	#else
 	FOREACH(i, scene.images) {
 	#endif
+		++progress;
 		MVS::Image& imageData = scene.images[i];
 		const PBA::Camera& cameraNVM = cameras[i];
 		if (cameraNVM.GetMeasurementDistortion() == 0)
@@ -364,17 +370,19 @@ int main(int argc, LPCTSTR* argv)
 			#ifdef _USE_OPENMP
 			bAbort = true;
 			#pragma omp flush (bAbort)
+			continue;
 			#else
 			return false;
 			#endif
 		}
 		MVS::UndistortImage(imageData.camera, cameraNVM.GetNormalizedMeasurementDistortion(), imageData.image, imageData.image);
 		const String name(pathData + String::FormatString(_T("%05u.png"), i));
-		Util::ensureDirectory(pathData);
+		Util::ensureDirectory(name);
 		if (!imageData.image.Save(name)) {
 			#ifdef _USE_OPENMP
 			bAbort = true;
 			#pragma omp flush (bAbort)
+			continue;
 			#else
 			return false;
 			#endif
@@ -385,6 +393,7 @@ int main(int argc, LPCTSTR* argv)
 	if (bAbort)
 		return EXIT_SUCCESS;
 	#endif
+	progress.close();
 
 	// write OpenMVS input data
 	scene.Save(MAKE_PATH_SAFE(OPT::strOutputFileName), (ARCHIVE_TYPE)OPT::nArchiveType);

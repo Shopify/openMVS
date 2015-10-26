@@ -29,6 +29,8 @@
 #endif
 #ifdef _SUPPORT_CPP11
 #include <cstdint>
+#include <cstddef>
+#include <type_traits>
 #include <initializer_list>
 #else
 #include <stdint.h>
@@ -115,7 +117,10 @@ namespace boost { void throw_exception(std::exception const&); }
 #include <Eigen/Geometry>
 #endif
 
+#include <opencv2/core/version.hpp>
+#if CV_MAJOR_VERSION > 2 || CV_MINOR_VERSION > 3
 #include <opencv2/opencv_modules.hpp>
+#endif
 #include <opencv2/opencv.hpp>
 #ifdef HAVE_OPENCV_GPU
 #if CV_MAJOR_VERSION > 2
@@ -235,6 +240,9 @@ typedef LPCSTR				LPCTSTR;
 #define _stprintf           sprintf
 #define _sntprintf          snprintf
 #define _vsntprintf         vsnprintf
+#define _vsctprintf         _vscprintf
+
+int _vscprintf(LPCSTR format, va_list pargs);
 
 #define _T(s)               s
 #endif //_MSC_VER
@@ -339,6 +347,8 @@ FORCEINLINE T RANDOM() { return (T(1)/RAND_MAX)*RAND(); }
 #include "Queue.h"
 #include "Hash.h"
 #include "Timer.h"
+#include "CriticalSection.h"
+#include "Semaphore.h"
 #include "Util.h"
 #include "File.h"
 #include "MemFile.h"
@@ -390,8 +400,6 @@ typedef class GENERAL_API cList<double, double, 0>      DoubleArr;
 } // namespace SEACAVE
 
 #include "Log.h"
-#include "CriticalSection.h"
-#include "Semaphore.h"
 #include "EventQueue.h"
 #include "SML.h"
 #include "ConfigTable.h"
@@ -1497,9 +1505,11 @@ public:
 	inline operator EMatMap () { return EMatMap((TYPE*)val); }
 	#endif
 
-	// calculate right/left null-vector of matrix A ([n,1])
+	// calculate right null-space of this matrix ([n,n-m])
+	inline TMatrix<TYPE,n,n-m> RightNullSpace(int flags = 0) const;
+	// calculate right/left null-vector of this matrix ([n/m,1])
 	inline TMatrix<TYPE,n,1> RightNullVector(int flags = 0) const;
-	inline TMatrix<TYPE,n,1> LeftNullVector(int flags = 0) const;
+	inline TMatrix<TYPE,m,1> LeftNullVector(int flags = 0) const;
 
 	#ifdef _USE_BOOST
 	// serialize
